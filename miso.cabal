@@ -37,181 +37,181 @@ flag tests
   description:
     Builds Miso's tests
 
-executable todo-mvc
-  main-is:
-    Main.hs
-  if !impl(ghcjs) || !flag(examples)
-    buildable: False
-  else
-    hs-source-dirs:
-      examples/todo-mvc
-    build-depends:
-      aeson,
-      base < 5,
-      containers,
-      miso
-    default-language:
-      Haskell2010
+-- executable todo-mvc
+--   main-is:
+--     Main.hs
+--   if !impl(ghcjs) || !flag(examples)
+--     buildable: False
+--   else
+--     hs-source-dirs:
+--       examples/todo-mvc
+--     build-depends:
+--       aeson,
+--       base < 5,
+--       containers,
+--       miso
+--     default-language:
+--       Haskell2010
 
-executable threejs
-  main-is:
-    Main.hs
-  if !impl(ghcjs) || !flag(examples)
-    buildable: False
-  else
-    hs-source-dirs:
-      examples/three
-    build-depends:
-      aeson,
-      base < 5,
-      ghcjs-base,
-      containers,
-      miso
-    default-language:
-      Haskell2010
+-- executable threejs
+--   main-is:
+--     Main.hs
+--   if !impl(ghcjs) || !flag(examples)
+--     buildable: False
+--   else
+--     hs-source-dirs:
+--       examples/three
+--     build-depends:
+--       aeson,
+--       base < 5,
+--       ghcjs-base,
+--       containers,
+--       miso
+--     default-language:
+--       Haskell2010
 
-executable file-reader
-  main-is:
-    Main.hs
-  if !impl(ghcjs) || !flag(examples)
-    buildable: False
-  else
-    hs-source-dirs:
-      examples/file-reader
-    build-depends:
-      aeson,
-      base < 5,
-      containers,
-      ghcjs-base,
-      miso
-    default-language:
-      Haskell2010
+-- executable file-reader
+--   main-is:
+--     Main.hs
+--   if !impl(ghcjs) || !flag(examples)
+--     buildable: False
+--   else
+--     hs-source-dirs:
+--       examples/file-reader
+--     build-depends:
+--       aeson,
+--       base < 5,
+--       containers,
+--       ghcjs-base,
+--       miso
+--     default-language:
+--       Haskell2010
 
-executable xhr
-  main-is:
-    Main.hs
-  if !impl(ghcjs) || !flag(examples)
-    buildable: False
-  else
-    hs-source-dirs:
-      examples/xhr
-    build-depends:
-      aeson,
-      base < 5,
-      containers,
-      ghcjs-base,
-      miso
-    default-language:
-      Haskell2010
+-- executable xhr
+--   main-is:
+--     Main.hs
+--   if !impl(ghcjs) || !flag(examples)
+--     buildable: False
+--   else
+--     hs-source-dirs:
+--       examples/xhr
+--     build-depends:
+--       aeson,
+--       base < 5,
+--       containers,
+--       ghcjs-base,
+--       miso
+--     default-language:
+--       Haskell2010
 
-executable canvas2d
-  main-is:
-    Main.hs
-  if !impl(ghcjs) || !flag(examples)
-    buildable: False
-  else
-    hs-source-dirs:
-      examples/canvas2d
-    build-depends:
-      aeson,
-      base < 5,
-      ghcjs-base,
-      miso
-    default-language:
-      Haskell2010
+-- executable canvas2d
+--   main-is:
+--     Main.hs
+--   if !impl(ghcjs) || !flag(examples)
+--     buildable: False
+--   else
+--     hs-source-dirs:
+--       examples/canvas2d
+--     build-depends:
+--       aeson,
+--       base < 5,
+--       ghcjs-base,
+--       miso
+--     default-language:
+--       Haskell2010
 
-executable router
-  main-is:
-    Main.hs
-  if !impl(ghcjs) || !flag(examples)
-    buildable: False
-  else
-    hs-source-dirs:
-      examples/router
-    build-depends:
-      aeson,
-      base < 5,
-      containers,
-      miso,
-      servant
-    default-language:
-      Haskell2010
+-- executable router
+--   main-is:
+--     Main.hs
+--   if !impl(ghcjs) || !flag(examples)
+--     buildable: False
+--   else
+--     hs-source-dirs:
+--       examples/router
+--     build-depends:
+--       aeson,
+--       base < 5,
+--       containers,
+--       miso,
+--       servant
+--     default-language:
+--       Haskell2010
 
-executable websocket
-  main-is:
-    Main.hs
-  if !impl(ghcjs) || !flag(examples)
-    buildable: False
-  else
-    hs-source-dirs:
-      examples/websocket
-    build-depends:
-      aeson,
-      base < 5,
-      containers,
-      miso
-    default-language:
-      Haskell2010
+-- executable websocket
+--   main-is:
+--     Main.hs
+--   if !impl(ghcjs) || !flag(examples)
+--     buildable: False
+--   else
+--     hs-source-dirs:
+--       examples/websocket
+--     build-depends:
+--       aeson,
+--       base < 5,
+--       containers,
+--       miso
+--     default-language:
+--       Haskell2010
 
-executable mario
-  main-is:
-    Main.hs
-  if !impl(ghcjs) || !flag(examples)
-    buildable: False
-  else
-    hs-source-dirs:
-      examples/mario
-    build-depends:
-      base < 5,
-      containers,
-      miso
-    default-language:
-      Haskell2010
+-- executable mario
+--   main-is:
+--     Main.hs
+--   if !impl(ghcjs) || !flag(examples)
+--     buildable: False
+--   else
+--     hs-source-dirs:
+--       examples/mario
+--     build-depends:
+--       base < 5,
+--       containers,
+--       miso
+--     default-language:
+--       Haskell2010
 
-executable svg
-  main-is:
-    Main.hs
-  if !impl(ghcjs) || !flag(examples)
-    buildable: False
-  else
-    hs-source-dirs:
-      examples/svg
-    build-depends:
-      base < 5,
-      containers,
-      miso
-    default-language:
-      Haskell2010
+-- executable svg
+--   main-is:
+--     Main.hs
+--   if !impl(ghcjs) || !flag(examples)
+--     buildable: False
+--   else
+--     hs-source-dirs:
+--       examples/svg
+--     build-depends:
+--       base < 5,
+--       containers,
+--       miso
+--     default-language:
+--       Haskell2010
 
-executable compose-update
-  main-is:
-    Main.hs
-  if !impl(ghcjs) || !flag(examples)
-    buildable: False
-  else
-    hs-source-dirs:
-      examples/compose-update
-    build-depends:
-      base < 5,
-      miso
-    default-language:
-      Haskell2010
+-- executable compose-update
+--   main-is:
+--     Main.hs
+--   if !impl(ghcjs) || !flag(examples)
+--     buildable: False
+--   else
+--     hs-source-dirs:
+--       examples/compose-update
+--     build-depends:
+--       base < 5,
+--       miso
+--     default-language:
+--       Haskell2010
 
-executable simple
-  main-is:
-    Main.hs
-  if !impl(ghcjs) || !flag(examples)
-    buildable: False
-  else
-    hs-source-dirs:
-      exe
-    build-depends:
-      aeson,
-      base < 5,
-      containers,
-      miso
-    default-language:
-      Haskell2010
+-- executable simple
+--   main-is:
+--     Main.hs
+--   if !impl(ghcjs) || !flag(examples)
+--     buildable: False
+--   else
+--     hs-source-dirs:
+--       exe
+--     build-depends:
+--       aeson,
+--       base < 5,
+--       containers,
+--       miso
+--     default-language:
+--       Haskell2010
 
 executable tests
   main-is:
@@ -250,7 +250,6 @@ library
     Miso.Svg.Event
     Miso.String
   other-modules:
-    Miso.Concurrent
     Miso.Html.Internal
   ghc-options:
     -Wall
@@ -283,6 +282,7 @@ library
       jsbits/isomorphic.js
       jsbits/util.js
     exposed-modules:
+      Miso.Concurrent
       Miso.Dev
       Miso.Effect
       Miso.Effect.Storage
@@ -304,6 +304,8 @@ library
   else
     exposed-modules:
       Miso.TypeLevel
+    other-modules:
+      Miso.Concurrent
     build-depends:
       lucid,
       servant-lucid,

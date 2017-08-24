@@ -49,19 +49,20 @@ common
   => App model action
   -> model
   -> ((action -> IO ()) -> IO (IORef VTree))
-  -> IO b
+  -> IO ()
 common App {..} m getView = do
   -- init Notifier
-  Notify {..} <- newNotify
+  notifier@Notify {..} <- newNotify
   -- init EventWriter
-  EventWriter {..} <- newEventWriter
+  eventWriter@EventWriter {..} <- newEventWriter
   -- init empty Model
   modelRef <- newIORef m
+  -- Create running app object
+  let runningApp = RunningApp {..}
   -- init empty actions
   actionsMVar <- newMVar S.empty
   -- init Subs
-  forM_ subs $ \sub ->
-    sub (readIORef modelRef) writeEvent
+  mapM_ (addSub runningApp) subs
   -- init event application thread
   void . forkIO . forever $ do
     action <- getEvent
@@ -85,7 +86,7 @@ common App {..} m getView = do
       modifyMVar actionsMVar $! \actions -> do
         (shouldDraw, effects) <- atomicModifyIORef' modelRef $! \oldModel ->
           let (newModel, effects) =
-                foldl' (foldEffects writeEvent update)
+                foldl' (foldEffects writeEvent (update runningApp))
                   (oldModel, pure ()) actions
           in (newModel, (oldModel /= newModel, effects))
         effects
@@ -99,8 +100,8 @@ common App {..} m getView = do
       Just oldVTree `diff` Just newVTree
       atomicWriteIORef viewRef newVTree
 
--- | Runs an isomorphic miso application
--- Assumes the pre-rendered DOM is already present
+-- | Runs an isomorphic miso application.
+-- Assumes the pre-rendered DOM is already present.
 miso :: (HasURI model, Eq model) => App model action -> IO ()
 miso app@App{..} = do
   uri <- getCurrentURI
@@ -114,7 +115,7 @@ miso app@App{..} = do
     -- Create virtual dom, perform initial diff
     newIORef initialVTree
 
--- | Runs a miso application
+-- | Runs a miso application.
 startApp :: Eq model => App model action -> IO ()
 startApp app@App {..} =
   common app model $ \writeEvent -> do

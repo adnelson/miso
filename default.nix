@@ -1,4 +1,4 @@
-{ nixpkgs ? import <nixpkgs> {}, tests ? true, haddock ? true }:
+{ nixpkgs ? import <nixpkgs> {}, tests ? true, haddock ? true, examples ? true }:
 let
   inherit (nixpkgs.haskell.lib) buildFromSdist enableCabalFlag sdistTarball buildStrictly;
   inherit (nixpkgs.haskell.packages) ghc802 ghcjs;
@@ -9,7 +9,7 @@ let
   miso-ghcjs = (ghcjs.callPackage ./miso-ghcjs.nix { }).overrideDerivation (drv: {
     doCheck = tests && !isDarwin;
     doHaddock = haddock;
-    postInstall = ''
+    postInstall = optionalString examples ''
       mkdir -p $out/bin/mario.jsexe/imgs
       cp -r ${drv.src}/examples/mario/imgs $out/bin/mario.jsexe/
       cp ${drv.src}/examples/todo-mvc/index.html $out/bin/todo-mvc.jsexe/
@@ -38,6 +38,7 @@ let
   }) {};
   result = {
     miso-ghcjs = buildStrictly (enableCabalFlag (enableCabalFlag miso-ghcjs "examples") "tests");
+    miso-ghcjs-min = buildStrictly miso-ghcjs;
     miso-ghc = buildStrictly miso-ghc;
     release = sdistTarball (buildStrictly miso-ghc);
     s3 = nixpkgs.writeScriptBin "s3.sh" ''
