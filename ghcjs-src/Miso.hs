@@ -15,7 +15,9 @@
 ----------------------------------------------------------------------------
 module Miso
   ( miso
+  , lowLevelMiso
   , startApp
+  , startLowLevelApp
   , module Miso.Effect
   , module Miso.Event
   , module Miso.Html
@@ -47,13 +49,13 @@ import           Miso.FFI
 -- | Helper function to abstract out common functionality between `startApp` and `miso`
 common
   :: Eq model
-  => App model action
+  => LowLevelApp model action
   -> model
   -> ((action -> IO ()) -> IO (IORef VTree))
-  -> IO b
-common App {..} m getView = do
+  -> IO ()
+common LowLevelApp{..} m getView = do
   -- init Notifier
-  Notify {..} <- newNotify
+  notifier@Notify {..} <- newNotify
   -- init empty Model
   modelRef <- newIORef m
   -- init empty actions
@@ -61,9 +63,14 @@ common App {..} m getView = do
   let writeEvent a = void . forkIO $ do
         atomicModifyIORef' actionsRef $ \as -> (as |> a, ())
         notify
+  -- Create running app object
+  let runningApp = RunningApp {
+        modelRef = modelRef,
+        notifier = notifier,
+        recordAppEvent = writeEvent
+        }
   -- init Subs
-  forM_ subs $ \sub ->
-    sub (readIORef modelRef) writeEvent
+  mapM_ (addSub runningApp) llSubs
   -- Hack to get around `BlockedIndefinitelyOnMVar` exception
   -- that occurs when no event handlers are present on a template
   -- and `notify` is no longer in scope
@@ -71,36 +78,40 @@ common App {..} m getView = do
   -- Retrieves reference view
   viewRef <- getView writeEvent
   -- Begin listening for events in the virtual dom
-  delegator viewRef events
+  delegator viewRef llEvents
   -- Process initial action of application
-  writeEvent initialAction
+  writeEvent llInitialAction
   -- Program loop, blocking on SkipChan
   forever $ wait >> do
     -- Apply actions to model
     actions <- atomicModifyIORef' actionsRef $ \actions -> (S.empty, actions)
     (shouldDraw, effects) <- atomicModifyIORef' modelRef $! \oldModel ->
           let (newModel, effects) =
-                foldl' (foldEffects writeEvent update)
+                foldl' (foldEffects writeEvent (llUpdate runningApp))
                   (oldModel, pure ()) actions
           in (newModel, (oldModel /= newModel, effects))
     effects
     when shouldDraw $ do
       newVTree <-
         flip runView writeEvent
-          =<< view <$> readIORef modelRef
+          =<< llView <$> readIORef modelRef
       oldVTree <- readIORef viewRef
       void $ waitForAnimationFrame
       Just oldVTree `diff` Just newVTree
       atomicWriteIORef viewRef newVTree
 
--- | Runs an isomorphic miso application
--- Assumes the pre-rendered DOM is already present
+-- | Runs an isomorphic miso application.
+-- Assumes the pre-rendered DOM is already present.
 miso :: (HasURI model, Eq model) => App model action -> IO ()
-miso app@App{..} = do
+miso = lowLevelMiso . mkLowLevelApp
+
+-- | Run isomorphic miso application, low-level interface.
+lowLevelMiso :: (HasURI model, Eq model) => LowLevelApp model action -> IO ()
+lowLevelMiso app@LowLevelApp{..} = do
   uri <- getCurrentURI
-  let modelWithUri = setURI uri model
-  common app model $ \writeEvent -> do
-    let initialView = view modelWithUri
+  let modelWithUri = setURI uri llModel
+  common app llModel $ \writeEvent -> do
+    let initialView = llView modelWithUri
     VTree (OI.Object iv) <- flip runView writeEvent initialView
     -- Initial diff can be bypassed, just copy DOM into VTree
     copyDOMIntoVTree iv
@@ -108,11 +119,15 @@ miso app@App{..} = do
     -- Create virtual dom, perform initial diff
     newIORef initialVTree
 
--- | Runs a miso application
+-- | Runs a miso application.
 startApp :: Eq model => App model action -> IO ()
-startApp app@App {..} =
-  common app model $ \writeEvent -> do
-    let initialView = view model
+startApp = startLowLevelApp . mkLowLevelApp
+
+-- | Runs a miso application, using the low-level app interface.
+startLowLevelApp :: Eq model => LowLevelApp model action -> IO ()
+startLowLevelApp app@LowLevelApp {..} =
+  common app llModel $ \writeEvent -> do
+    let initialView = llView llModel
     initialVTree <- flip runView writeEvent initialView
     Nothing `diff` (Just initialVTree)
     newIORef initialVTree
@@ -126,6 +141,15 @@ foldEffects sink update = \(!model, !as) action ->
   case update action model of
     Effect newModel effs -> (newModel, newAs)
       where
-        newAs = as >> do
-          forM_ effs $ \eff ->
-            void $ forkIO (sink =<< eff)
+        newAs = as >> (mapM_ (forkIO . sink =<<) effs)
+
+-- | Translate the higher-level 'App' type into a 'LowLevelApp'
+mkLowLevelApp :: App model action -> LowLevelApp model action
+mkLowLevelApp app = LowLevelApp {
+  llModel = model app,
+  llUpdate = \_ -> update app,
+  llView = view app,
+  llSubs = subs app,
+  llEvents = events app,
+  llInitialAction = initialAction app
+  }

@@ -20,6 +20,7 @@ module Miso.FFI
    , consoleLog
    , stringify
    , parse
+   , parseResult
    , copyDOMIntoVTree
    , item
    , jsvalToValue
@@ -112,12 +113,17 @@ stringify j = stringify' =<< toJSVal (toJSON j)
 -- | Parses a JSString
 parse :: FromJSON json => JSVal -> IO json
 {-# INLINE parse #-}
-parse jval = do
-  k <- parse' jval
-  Just val <- jsvalToValue k
-  case fromJSON val of
-    Success x -> pure x
-    Error y -> error y
+parse jval = parseResult jval >>= \case
+  Success obj -> pure obj
+  Error e -> error ("When parsing JSON: " ++ e)
+
+-- | Parse a JSString into a result
+parseResult :: FromJSON obj => JSVal -> IO (Result obj)
+{-# INLINE parseResult #-}
+parseResult jval = do
+  parsed <- parse' jval
+  Just val <- jsvalToValue parsed
+  pure $ fromJSON val
 
 -- | Indexing into a JS object
 foreign import javascript unsafe "$r = $1[$2];"

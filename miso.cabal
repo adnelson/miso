@@ -262,7 +262,6 @@ library
     Miso.Svg.Event
     Miso.String
   other-modules:
-    Miso.Concurrent
     Miso.Html.Internal
   ghc-options:
     -Wall
@@ -295,6 +294,7 @@ library
       jsbits/isomorphic.js
       jsbits/util.js
     exposed-modules:
+      Miso.Concurrent
       Miso.Dev
       Miso.Effect
       Miso.Effect.Storage
@@ -315,6 +315,8 @@ library
   else
     exposed-modules:
       Miso.TypeLevel
+    other-modules:
+      Miso.Concurrent
     build-depends:
       lucid,
       servant-lucid,
