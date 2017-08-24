@@ -9,6 +9,8 @@
 ----------------------------------------------------------------------------
 module Miso.Types
   ( App (..)
+  , LowLevelApp (..)
+  , RunningApp (..)
 
     -- * The Transition Monad
   , Transition
@@ -21,11 +23,36 @@ import           Control.Monad.Trans.Class (lift)
 import           Control.Monad.Trans.State.Strict (StateT(StateT), execStateT)
 import           Control.Monad.Trans.Writer.Strict (WriterT(WriterT), Writer, runWriter, tell)
 import qualified Data.Map           as M
+import           Data.IORef (IORef)
 import           Miso.Effect
 import           Miso.Html.Internal
 import           Miso.String
+import           Miso.Concurrent (Notify)
 
--- | Application entry point
+-- | Runtime data for an app.
+data RunningApp action model = RunningApp {
+  modelRef :: IORef model,
+  notifier :: Notify,
+  recordAppEvent :: action -> IO ()
+  }
+
+-- | Low-level application
+data LowLevelApp model action = LowLevelApp
+  { llModel :: model
+  -- ^ initial model
+  , llUpdate :: RunningApp action model -> action -> model -> Effect action model
+  -- ^ Function to update model, optionally provide effects
+  , llView :: model -> View action
+  -- ^ Function to draw `View`
+  , llSubs :: [ Sub action model ]
+  -- ^ List of subscriptions to run during application lifetime
+  , llEvents :: M.Map MisoString Bool
+  -- ^ List of delegated events that the body element will listen for
+  , llInitialAction :: action
+  -- ^ Initial action that is run after the application has loaded
+  }
+
+-- | Application definition
 data App model action = App
   { model :: model
   -- ^ initial model
@@ -41,6 +68,7 @@ data App model action = App
   , initialAction :: action
   -- ^ Initial action that is run after the application has loaded
   }
+
 
 -- | A monad for succinctly expressing model transitions in the 'update' function.
 --
