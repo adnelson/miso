@@ -13,8 +13,8 @@ module Miso.Effect (
 , module Miso.Effect.DOM
 , Effect (..)
 , noEff
-, (<#)
-, (#>)
+, (<#), (#>)
+, (<##), (##>)
 ) where
 
 import Miso.Effect.Storage
@@ -27,7 +27,7 @@ import Miso.Effect.DOM
 -- is run in a new thread so there is no risk of accidentally
 -- blocking the application.
 data Effect action model
-  = Effect model [IO action]
+  = Effect model [IO [action]]
 
 instance Functor (Effect action) where
   fmap f (Effect m acts) = Effect (f m) acts
@@ -48,8 +48,14 @@ noEff m = Effect m []
 
 -- | Smart constructor for an 'Effect' with exactly one action.
 (<#) :: model -> IO action -> Effect action model
-(<#) m a = Effect m [a]
+(<#) m a = Effect m [(:[]) <$> a]
 
 -- | `Effect` smart constructor, flipped
 (#>) :: IO action -> model -> Effect action model
 (#>) = flip (<#)
+
+(<##) :: model -> IO [action] -> Effect action model
+(<##) m io = Effect m [io]
+
+(##>) :: IO [action] -> model -> Effect action model
+(##>) = flip (<##)

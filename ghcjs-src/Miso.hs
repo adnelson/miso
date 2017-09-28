@@ -134,5 +134,10 @@ foldEffects sink update = \(model, as) action ->
     Effect newModel effs -> (newModel, newAs)
       where
         newAs = as >> do
-          forM_ effs $ \eff ->
-            void $ forkIO (sink =<< eff)
+          -- Evaluate the IOs in the Effect.
+          forM_ effs $ \actionListIO -> do
+            -- Each will produce a list of actions.
+            actionList <- actionListIO
+            forM_ actionList $ \act -> do
+              -- Feed each action into the `sink`, in a new thread.
+              forkIO $ sink act
