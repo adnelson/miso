@@ -1,3 +1,4 @@
+{-# LANGUAGE RecordWildCards     #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Miso.Types
@@ -9,8 +10,8 @@
 ----------------------------------------------------------------------------
 module Miso.Types
   ( App (..)
-  , LowLevelApp (..)
-  , RunningApp (..)
+  , AppContext (..)
+  , newAppContext
 
     -- * The Transition Monad
   , Transition
@@ -19,38 +20,40 @@ module Miso.Types
   , scheduleIO
   ) where
 
+import           Control.Concurrent (forkIO)
+import           Control.Monad (void)
 import           Control.Monad.Trans.Class (lift)
 import           Control.Monad.Trans.State.Strict (StateT(StateT), execStateT)
 import           Control.Monad.Trans.Writer.Strict (WriterT(WriterT), Writer, runWriter, tell)
 import qualified Data.Map           as M
-import           Data.IORef (IORef)
+import           Data.Sequence (Seq, (|>))
+import           Data.IORef (IORef, newIORef, atomicModifyIORef')
 import           Miso.Effect
 import           Miso.Html.Internal
 import           Miso.String
-import           Miso.Concurrent (Notify)
+import           Miso.Concurrent (Notify(..), newNotify)
 
 -- | Runtime data for an app.
-data RunningApp action model = RunningApp {
+data AppContext action model = AppContext {
   modelRef :: IORef model,
   notifier :: Notify,
-  recordAppEvent :: action -> IO ()
+  actionsRef :: IORef (Seq action),
+  writeEvent :: action -> IO ()
   }
 
--- | Low-level application
-data LowLevelApp model action = LowLevelApp
-  { llModel :: model
-  -- ^ initial model
-  , llUpdate :: RunningApp action model -> action -> model -> Effect action model
-  -- ^ Function to update model, optionally provide effects
-  , llView :: model -> View action
-  -- ^ Function to draw `View`
-  , llSubs :: [ Sub action model ]
-  -- ^ List of subscriptions to run during application lifetime
-  , llEvents :: M.Map MisoString Bool
-  -- ^ List of delegated events that the body element will listen for
-  , llInitialAction :: action
-  -- ^ Initial action that is run after the application has loaded
-  }
+newAppContext :: model -> IO (AppContext action model)
+newAppContext m = do
+  -- init Notifier
+  notifier@Notify {..} <- newNotify
+  -- init empty Model
+  modelRef <- newIORef m
+  -- init empty actions
+  actionsRef <- newIORef mempty
+  let writeEvent a = void . forkIO $ do
+        atomicModifyIORef' actionsRef $ \as -> (as |> a, ())
+        notify
+
+  pure AppContext {..}
 
 -- | Application definition
 data App model action = App

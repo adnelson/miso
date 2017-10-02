@@ -1,4 +1,4 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# Language RecordWildCards #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Miso.Subscription
@@ -29,8 +29,8 @@ import Miso.Subscription.Window
 import Miso.Subscription.SSE
 
 import Miso.Html.Internal (Sub)
-import Miso.Types (RunningApp(..))
+import Miso.Types (AppContext(..))
 
 -- | Add a subscription to a running app
-addSub :: RunningApp action model -> Sub action model -> IO ()
-addSub RunningApp {..} sub = sub (readIORef modelRef) recordAppEvent
+addSub :: AppContext action model -> Sub action model -> IO ()
+addSub AppContext {..} sub = sub (readIORef modelRef) writeEvent

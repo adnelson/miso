@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns        #-}
+{-# Language BangPatterns        #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE RecordWildCards     #-}
@@ -15,9 +15,8 @@
 ----------------------------------------------------------------------------
 module Miso
   ( miso
-  , lowLevelMiso
   , startApp
-  , startLowLevelApp
+  , startAppInContext
   , module Miso.Effect
   , module Miso.Event
   , module Miso.Html
@@ -30,7 +29,6 @@ import           Control.Concurrent
 import           Control.Monad
 import           Data.IORef
 import           Data.List
-import           Data.Sequence                 ((|>))
 import qualified Data.Sequence                 as S
 import qualified JavaScript.Object.Internal    as OI
 import           JavaScript.Web.AnimationFrame
@@ -49,28 +47,14 @@ import           Miso.FFI
 -- | Helper function to abstract out common functionality between `startApp` and `miso`
 common
   :: Eq model
-  => LowLevelApp model action
-  -> model
+  => AppContext action model
+  -> App model action
   -> ((action -> IO ()) -> IO (IORef VTree))
   -> IO ()
-common LowLevelApp{..} m getView = do
-  -- init Notifier
-  notifier@Notify {..} <- newNotify
-  -- init empty Model
-  modelRef <- newIORef m
-  -- init empty actions
-  actionsRef <- newIORef S.empty
-  let writeEvent a = void . forkIO $ do
-        atomicModifyIORef' actionsRef $ \as -> (as |> a, ())
-        notify
-  -- Create running app object
-  let runningApp = RunningApp {
-        modelRef = modelRef,
-        notifier = notifier,
-        recordAppEvent = writeEvent
-        }
+common (ctx@AppContext{..}) App{..} getView = do
+  let Notify {..} = notifier
   -- init Subs
-  mapM_ (addSub runningApp) llSubs
+  mapM_ (addSub ctx) subs
   -- Hack to get around `BlockedIndefinitelyOnMVar` exception
   -- that occurs when no event handlers are present on a template
   -- and `notify` is no longer in scope
@@ -78,40 +62,36 @@ common LowLevelApp{..} m getView = do
   -- Retrieves reference view
   viewRef <- getView writeEvent
   -- Begin listening for events in the virtual dom
-  delegator viewRef llEvents
+  delegator viewRef events
   -- Process initial action of application
-  writeEvent llInitialAction
+  writeEvent initialAction
   -- Program loop, blocking on SkipChan
   forever $ wait >> do
     -- Apply actions to model
     actions <- atomicModifyIORef' actionsRef $ \actions -> (S.empty, actions)
     (shouldDraw, effects) <- atomicModifyIORef' modelRef $! \oldModel ->
           let (newModel, effects) =
-                foldl' (foldEffects writeEvent (llUpdate runningApp))
+                foldl' (foldEffects writeEvent update)
                   (oldModel, pure ()) actions
           in (newModel, (oldModel /= newModel, effects))
     effects
     when shouldDraw $ do
       newVTree <-
         flip runView writeEvent
-          =<< llView <$> readIORef modelRef
+          =<< view <$> readIORef modelRef
       oldVTree <- readIORef viewRef
       void $ waitForAnimationFrame
       Just oldVTree `diff` Just newVTree
       atomicWriteIORef viewRef newVTree
 
--- | Runs an isomorphic miso application.
--- Assumes the pre-rendered DOM is already present.
-miso :: (HasURI model, Eq model) => App model action -> IO ()
-miso = lowLevelMiso . mkLowLevelApp
-
 -- | Run isomorphic miso application, low-level interface.
-lowLevelMiso :: (HasURI model, Eq model) => LowLevelApp model action -> IO ()
-lowLevelMiso app@LowLevelApp{..} = do
+miso :: (HasURI model, Eq model) => App model action -> IO ()
+miso app@App{..} = do
   uri <- getCurrentURI
-  let modelWithUri = setURI uri llModel
-  common app llModel $ \writeEvent -> do
-    let initialView = llView modelWithUri
+  let modelWithUri = setURI uri model
+  context <- newAppContext modelWithUri
+  common context app $ \writeEvent -> do
+    let initialView = view modelWithUri
     VTree (OI.Object iv) <- flip runView writeEvent initialView
     -- Initial diff can be bypassed, just copy DOM into VTree
     copyDOMIntoVTree iv
@@ -121,13 +101,15 @@ lowLevelMiso app@LowLevelApp{..} = do
 
 -- | Runs a miso application.
 startApp :: Eq model => App model action -> IO ()
-startApp = startLowLevelApp . mkLowLevelApp
+startApp app@App {..} = do
+  context <- newAppContext model
+  startAppInContext context app
 
--- | Runs a miso application, using the low-level app interface.
-startLowLevelApp :: Eq model => LowLevelApp model action -> IO ()
-startLowLevelApp app@LowLevelApp {..} =
-  common app llModel $ \writeEvent -> do
-    let initialView = llView llModel
+startAppInContext
+  :: Eq model => AppContext action model -> App model action -> IO ()
+startAppInContext context (app@App{..}) = do
+  common context app $ \writeEvent -> do
+    let initialView = view model
     initialVTree <- flip runView writeEvent initialView
     Nothing `diff` (Just initialVTree)
     newIORef initialVTree
@@ -142,14 +124,3 @@ foldEffects sink update = \(!model, !as) action ->
     Effect newModel effs -> (newModel, newAs)
       where
         newAs = as >> (mapM_ (forkIO . sink =<<) effs)
-
--- | Translate the higher-level 'App' type into a 'LowLevelApp'
-mkLowLevelApp :: App model action -> LowLevelApp model action
-mkLowLevelApp app = LowLevelApp {
-  llModel = model app,
-  llUpdate = \_ -> update app,
-  llView = view app,
-  llSubs = subs app,
-  llEvents = events app,
-  llInitialAction = initialAction app
-  }
