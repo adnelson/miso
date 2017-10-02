@@ -1,3 +1,6 @@
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE TypeFamilies #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Miso.Types
@@ -10,6 +13,15 @@
 module Miso.Types
   ( App (..)
 
+  -- * Application context
+  , AppContext (..)
+  , newAppContext
+  , writeEventTo
+
+  -- * Subscription type
+  , Sub
+  , addSub
+
     -- * The Transition Monad
   , Transition
   , fromTransition
@@ -17,13 +29,68 @@ module Miso.Types
   , scheduleIO
   ) where
 
+import           Control.Concurrent (forkIO)
+import           Control.Concurrent.MVar (MVar, newMVar)
+import           Control.Monad (void)
 import           Control.Monad.Trans.Class (lift)
 import           Control.Monad.Trans.State.Strict (StateT(StateT), execStateT)
 import           Control.Monad.Trans.Writer.Strict (WriterT(WriterT), Writer, runWriter, tell)
 import qualified Data.Map           as M
+import           Data.Sequence (Seq, (|>))
+
 import           Miso.Effect
-import           Miso.Html.Internal
+import           Miso.Html.Internal (View)
 import           Miso.String
+import           Miso.Concurrent (Notify(..), newNotify)
+
+import Data.IORef (IORef, readIORef, newIORef, atomicModifyIORef')
+
+-- | Runtime data for an app.
+data AppContext action model = AppContext {
+  modelRef :: IORef model,
+  -- ^ IO action which returns the current model.
+  notifier :: Notify,
+  -- ^ Syncronizes app actions and signals new events.
+  actionsRef :: IORef (Seq action)
+  -- ^ List of actions, for the app to respond to.
+  }
+
+-- | Adds an action to the app's event stream.
+writeEventTo :: AppContext action model -> action -> IO ()
+writeEventTo AppContext {..} action = void . forkIO $ do
+  atomicModifyIORef' actionsRef $ \actions -> (actions |> action, ())
+  notify notifier
+
+-- | Create a new app context.
+newAppContext :: model -> IO (AppContext action model)
+newAppContext m = do
+  -- init Notifier
+  notifier@Notify {..} <- newNotify
+  -- init empty Model
+  modelRef <- newIORef m
+  -- init empty actions
+  actionsRef <- newIORef mempty
+  pure AppContext {..}
+
+-- | Type synonym for constructing event subscriptions.
+--
+-- The first argument passed to a subscription provides a way to
+-- access the current value of the model (without blocking). The
+-- callback is used to dispatch actions which are then fed back to the
+-- @update@ function.
+type Sub action model = IO model -> (action -> IO ()) -> IO ()
+
+-- type Sub' action model = AppContext action model -> IO ()
+
+-- class Subscription handle where
+--   type Event handle :: *
+--   makeSub (Event handle -> action) -> Sub' action model
+
+--   subscribe ::
+
+-- | Add a subscription to a running app
+addSub :: AppContext action model -> Sub action model -> IO ()
+addSub ctx sub = sub (readIORef $ modelRef ctx) (writeEventTo ctx)
 
 -- | Application entry point
 data App model action = App
