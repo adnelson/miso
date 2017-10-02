@@ -29,8 +29,8 @@ import Miso.Subscription.Window
 import Miso.Subscription.SSE
 
 import Miso.Html.Internal (Sub)
-import Miso.Types (AppContext(..))
+import Miso.Types (AppContext(..), writeAction)
 
 -- | Add a subscription to a running app
 addSub :: AppContext action model -> Sub action model -> IO ()
-addSub AppContext {..} sub = sub (readIORef modelRef) writeEvent
+addSub ctx sub = sub (readIORef $ modelRef ctx) (writeAction ctx)

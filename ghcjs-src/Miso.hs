@@ -1,4 +1,4 @@
-{-# Language BangPatterns        #-}
+{-# LANGUAGE BangPatterns        #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE RecordWildCards     #-}
@@ -49,7 +49,7 @@ common
   :: Eq model
   => AppContext action model
   -> App model action
-  -> ((action -> IO ()) -> IO (IORef VTree))
+  -> IO (IORef VTree)
   -> IO ()
 common (ctx@AppContext{..}) App{..} getView = do
   let Notify {..} = notifier
@@ -60,67 +60,61 @@ common (ctx@AppContext{..}) App{..} getView = do
   -- and `notify` is no longer in scope
   void . forkIO . forever $ threadDelay (1000000 * 86400) >> notify
   -- Retrieves reference view
-  viewRef <- getView writeEvent
+  viewRef <- getView
   -- Begin listening for events in the virtual dom
   delegator viewRef events
   -- Process initial action of application
-  writeEvent initialAction
+  writeAction ctx initialAction
   -- Program loop, blocking on SkipChan
   forever $ wait >> do
     -- Apply actions to model
     actions <- atomicModifyIORef' actionsRef $ \actions -> (S.empty, actions)
-    (shouldDraw, effects) <- atomicModifyIORef' modelRef $! \oldModel ->
-          let (newModel, effects) =
-                foldl' (foldEffects writeEvent update)
-                  (oldModel, pure ()) actions
-          in (newModel, (oldModel /= newModel, effects))
+    (shouldDraw, effects) <- atomicModifyIORef' modelRef $! \oldModel -> do
+      let foldEffects (!oldModel', !as) action = do
+            -- Apply the update function to the current model
+            let Effect newModel' effs = update action oldModel'
+            -- Evaluate each effect in a new thread; put the resulting action
+            -- in the event loop. Pass the new model to the next iteration.
+            (newModel', as >> mapM_ (forkIO . writeAction ctx =<<) effs)
+      let (newModel, effects) =
+            foldl' foldEffects (oldModel, pure ()) actions
+      (newModel, (oldModel /= newModel, effects))
     effects
     when shouldDraw $ do
-      newVTree <-
-        flip runView writeEvent
-          =<< view <$> readIORef modelRef
+      newVTree <- flip runView (writeAction ctx) =<< view <$> readIORef modelRef
       oldVTree <- readIORef viewRef
       void $ waitForAnimationFrame
       Just oldVTree `diff` Just newVTree
       atomicWriteIORef viewRef newVTree
 
--- | Run isomorphic miso application, low-level interface.
+-- | Run isomorphic miso application
+-- Assumes the pre-rendered DOM is already present
 miso :: (HasURI model, Eq model) => App model action -> IO ()
 miso app@App{..} = do
   uri <- getCurrentURI
   let modelWithUri = setURI uri model
   context <- newAppContext modelWithUri
-  common context app $ \writeEvent -> do
+  common context app $ do
     let initialView = view modelWithUri
-    VTree (OI.Object iv) <- flip runView writeEvent initialView
+    VTree (OI.Object iv) <- flip runView (writeAction context) initialView
     -- Initial diff can be bypassed, just copy DOM into VTree
     copyDOMIntoVTree iv
     let initialVTree = VTree (OI.Object iv)
     -- Create virtual dom, perform initial diff
     newIORef initialVTree
 
--- | Runs a miso application.
+-- | Runs a miso application, creating a new context from the model.
 startApp :: Eq model => App model action -> IO ()
 startApp app@App {..} = do
   context <- newAppContext model
   startAppInContext context app
 
+-- | Run a miso application given a context.
 startAppInContext
   :: Eq model => AppContext action model -> App model action -> IO ()
 startAppInContext context (app@App{..}) = do
-  common context app $ \writeEvent -> do
+  common context app $ do
     let initialView = view model
-    initialVTree <- flip runView writeEvent initialView
-    Nothing `diff` (Just initialVTree)
+    initialVTree <- flip runView (writeAction context) initialView
+    Nothing `diff` Just initialVTree
     newIORef initialVTree
-
--- | Helper
-foldEffects
-  :: (action -> IO ())
-  -> (action -> model -> Effect action model)
-  -> (model, IO ()) -> action -> (model, IO ())
-foldEffects sink update = \(!model, !as) action ->
-  case update action model of
-    Effect newModel effs -> (newModel, newAs)
-      where
-        newAs = as >> (mapM_ (forkIO . sink =<<) effs)

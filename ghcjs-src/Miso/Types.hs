@@ -1,4 +1,4 @@
-{-# LANGUAGE RecordWildCards     #-}
+{-# Language RecordWildCards     #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Miso.Types
@@ -12,6 +12,7 @@ module Miso.Types
   ( App (..)
   , AppContext (..)
   , newAppContext
+  , writeAction
 
     -- * The Transition Monad
   , Transition
@@ -36,24 +37,32 @@ import           Miso.Concurrent (Notify(..), newNotify)
 -- | Runtime data for an app.
 data AppContext action model = AppContext {
   modelRef :: IORef model,
+  -- ^ IORef which contains the model currently being displayed by the app.
   notifier :: Notify,
-  actionsRef :: IORef (Seq action),
-  writeEvent :: action -> IO ()
+  -- ^ Provides primitives for blocking the app until the model updates.
+  actionsRef :: IORef (Seq action)
+  -- ^ Actions queue; the app is updated as these are processed.
   }
 
+-- | Create a new application context.
 newAppContext :: model -> IO (AppContext action model)
 newAppContext m = do
-  -- init Notifier
+  -- init Notifier.
   notifier@Notify {..} <- newNotify
-  -- init empty Model
+  -- init Model ref with the given model.
   modelRef <- newIORef m
-  -- init empty actions
+  -- init empty actions.
   actionsRef <- newIORef mempty
-  let writeEvent a = void . forkIO $ do
-        atomicModifyIORef' actionsRef $ \as -> (as |> a, ())
-        notify
-
+  -- Use the above values to instantiate an AppContext.
   pure AppContext {..}
+
+
+-- | Write a new action to an application context.
+writeAction :: AppContext action model -> action -> IO ()
+writeAction (AppContext{..}) a = void . forkIO $ do
+  atomicModifyIORef' actionsRef $ \as -> (as |> a, ())
+  notify notifier
+
 
 -- | Application definition
 data App model action = App
