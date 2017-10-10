@@ -277,12 +277,15 @@ library
     network-uri,
     servant,
     text,
+    network-uri,
     transformers
   if impl(ghcjs)
     hs-source-dirs:
       ghcjs-src
     build-depends:
       ghcjs-base,
+      http-types,
+      http-api-data,
       containers,
       scientific,
       unordered-containers,
