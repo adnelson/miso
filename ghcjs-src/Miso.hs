@@ -15,8 +15,9 @@
 ----------------------------------------------------------------------------
 module Miso
   ( miso
+  , misoWithContext
   , startApp
-  , startAppInContext
+  , startAppWithContext
   , module Miso.Effect
   , module Miso.Event
   , module Miso.Html
@@ -90,12 +91,18 @@ common (ctx@AppContext{..}) App{..} getView = do
 -- | Run isomorphic miso application
 -- Assumes the pre-rendered DOM is already present
 miso :: (HasURI model, Eq model) => App model action -> IO ()
-miso app@App{..} = do
-  uri <- getCurrentURI
-  let modelWithUri = setURI uri model
-  context <- newAppContext modelWithUri
+miso app = do
+  context <- newAppContext (model app)
+  misoWithContext context app
+
+-- | Run isomorphic app, given a context.
+misoWithContext
+  :: (HasURI model, Eq model)
+  => AppContext action model -> App model action -> IO ()
+misoWithContext context (app@App{..}) = do
   common context app $ do
-    let initialView = view modelWithUri
+    uri <- getCurrentURI
+    let initialView = view $ setURI uri model
     VTree (OI.Object iv) <- flip runView (writeAction context) initialView
     -- Initial diff can be bypassed, just copy DOM into VTree
     copyDOMIntoVTree iv
@@ -105,14 +112,14 @@ miso app@App{..} = do
 
 -- | Runs a miso application, creating a new context from the model.
 startApp :: Eq model => App model action -> IO ()
-startApp app@App {..} = do
-  context <- newAppContext model
-  startAppInContext context app
+startApp app = do
+  context <- newAppContext (model app)
+  startAppWithContext context app
 
 -- | Run a miso application given a context.
-startAppInContext
+startAppWithContext
   :: Eq model => AppContext action model -> App model action -> IO ()
-startAppInContext context (app@App{..}) = do
+startAppWithContext context (app@App{..}) = do
   common context app $ do
     let initialView = view model
     initialVTree <- flip runView (writeAction context) initialView

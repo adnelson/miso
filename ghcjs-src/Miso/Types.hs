@@ -46,11 +46,11 @@ data AppContext action model = AppContext {
 
 -- | Create a new application context.
 newAppContext :: model -> IO (AppContext action model)
-newAppContext m = do
+newAppContext model = do
   -- init Notifier.
   notifier@Notify {..} <- newNotify
   -- init Model ref with the given model.
-  modelRef <- newIORef m
+  modelRef <- newIORef model
   -- init empty actions.
   actionsRef <- newIORef mempty
   -- Use the above values to instantiate an AppContext.
