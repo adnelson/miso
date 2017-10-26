@@ -89,6 +89,18 @@ foreign import javascript unsafe "$1.close();"
 foreign import javascript unsafe "$r = $1.url;"
   getEventSourceUrl :: EventSource -> IO MisoString
 
+foreign import javascript unsafe "$r = $1 == $2;"
+  eventSourcesEqual_ :: EventSource -> EventSource -> Bool
+
+foreign import javascript unsafe "$r = $1.url;"
+  eventSourceUrl_ :: EventSource -> MisoString
+
+instance Eq EventSource where
+  (==) = eventSourcesEqual_
+
+instance Show EventSource where
+  show es = "EventSource " ++ show (eventSourceUrl_ es)
+
 -- | Test URL
 -- http://sapid.sourceforge.net/ssetest/webkit.events.php
 -- var source = new EventSource("demo_sse.php");

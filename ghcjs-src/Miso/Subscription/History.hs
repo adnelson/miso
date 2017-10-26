@@ -23,14 +23,20 @@ module Miso.Subscription.History
   , URI (..)
   ) where
 
+import Prelude
 import Control.Concurrent
 import Control.Monad
 import GHCJS.Foreign.Callback
-import Miso.Concurrent
+import qualified Data.List    as L
 import Miso.Html.Internal     ( Sub )
+import Miso.Concurrent
 import Miso.String
 import Network.URI            hiding (path)
 import System.IO.Unsafe
+
+-- | Add a prefix to a string, unless it already has it.
+ensurePrefix :: String -> String -> String
+ensurePrefix p s = if L.isPrefixOf p s then s else p ++ s
 
 -- | Retrieves current URI of page
 getCurrentURI :: IO URI
@@ -43,7 +49,7 @@ getURI :: IO URI
 getURI = do
   URI <$> do unpack <$> getProtocol
       <*> pure Nothing
-      <*> do Prelude.drop 1 . unpack <$> getPathName
+      <*> do ensurePrefix "/" . unpack <$> getPathName
       <*> do unpack <$> getSearch
       <*> do unpack <$> getHash
 
@@ -53,7 +59,7 @@ pushURI :: URI -> IO ()
 pushURI uri = pushStateNoModel uri { uriPath = path }
   where
     path | uriPath uri == mempty = "/"
-         | otherwise = uriPath uri
+         | otherwise = ensurePrefix "/" (uriPath uri)
 
 -- | Replaces current URI on stack
 replaceURI :: URI -> IO ()
@@ -61,7 +67,7 @@ replaceURI :: URI -> IO ()
 replaceURI uri = replaceTo' uri { uriPath = path }
   where
     path | uriPath uri == mempty = "/"
-         | otherwise = uriPath uri
+         | otherwise = ensurePrefix "/" (uriPath uri)
 
 -- | Navigates backwards
 back :: IO ()
@@ -102,25 +108,25 @@ foreign import javascript unsafe "window.history.forward();"
   forward' :: IO ()
 
 foreign import javascript unsafe "$r = window.location.pathname;"
-  getPathName :: IO JSString
+  getPathName :: IO MisoString
 
 foreign import javascript unsafe "$r = window.location.search;"
-  getSearch :: IO JSString
+  getSearch :: IO MisoString
 
 foreign import javascript unsafe "$r = window.location.hash;"
-  getHash :: IO JSString
+  getHash :: IO MisoString
 
 foreign import javascript unsafe "$r = window.location.protocol;"
-  getProtocol :: IO JSString
+  getProtocol :: IO MisoString
 
 foreign import javascript unsafe "window.addEventListener('popstate', $1);"
   onPopState :: Callback (IO ()) -> IO ()
 
 foreign import javascript unsafe "window.history.pushState(null, null, $1);"
-  pushStateNoModel' :: JSString -> IO ()
+  pushStateNoModel' :: MisoString -> IO ()
 
 foreign import javascript unsafe "window.history.replaceState(null, null, $1);"
-  replaceState' :: JSString -> IO ()
+  replaceState' :: MisoString -> IO ()
 
 pushStateNoModel :: URI -> IO ()
 {-# INLINE pushStateNoModel #-}
