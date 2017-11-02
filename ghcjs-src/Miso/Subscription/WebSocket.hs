@@ -16,183 +16,70 @@
 ----------------------------------------------------------------------------
 module Miso.Subscription.WebSocket
   ( -- * Types
-    WebSocket   (..)
-  , URL         (..)
-  , Protocols   (..)
-  , SocketState (..)
-  , CloseCode   (..)
-  , WasClean    (..)
-  , Reason      (..)
+    WebSocket
+  , WebSocketEvent       (..)
+  , WebSocketClosedEvent (..)
+  , SocketState          (..)
+  , CloseCode            (..)
     -- * Subscription
   , websocketSub
-  , send
-  , connect
+  , websocketSubFromWebSocket
+
+    -- * Interacting with the websocket
+  , sendJsonToWebSocket
+  , closeWebSocket
+  , closeWebSocketWithCode
+
+    -- * Querying the socket
   , getSocketState
+  , getSocketURL
+
+    -- * Handling a close event
+  , reconnectIfAbnormal
   ) where
 
-import Control.Concurrent
+import Prelude
+import Control.Concurrent      (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Monad
 import Data.Aeson
-import Data.IORef
-import Data.Maybe
 import GHC.Generics
 import GHCJS.Foreign.Callback
 import GHCJS.Marshal
 import GHCJS.Types
-import Prelude                hiding (map)
-import System.IO.Unsafe
+import Prelude                 hiding (map)
 
-import Miso.FFI
-import Miso.Html.Internal     ( Sub )
+import Miso.FFI                (parse, stringify)
+import Miso.Html.Internal      (Sub)
 import Miso.String
 
--- | WebSocket connection messages
-data WebSocket action
-  = WebSocketMessage action
-  | WebSocketClose CloseCode WasClean Reason
+-- | WebSocket data type
+newtype WebSocket = WebSocket JSVal
+
+-- | WebSocket connection messages. The `message` type should be a
+-- | `FromJSON` instance.
+data WebSocketEvent message
+  = WebSocketMessage message
+  | WebSocketClosed WebSocketClosedEvent
   | WebSocketOpen
   | WebSocketError MisoString
+  deriving (Show, Eq, Generic)
 
-websocket :: IORef (Maybe Socket)
-{-# NOINLINE websocket #-}
-websocket = unsafePerformIO (newIORef Nothing)
-
-closedCode :: IORef (Maybe CloseCode)
-{-# NOINLINE closedCode #-}
-closedCode = unsafePerformIO (newIORef Nothing)
-
-secs :: Int -> Int
-secs = (*1000000)
-
--- | WebSocket subscription
-websocketSub
-  :: FromJSON m
-  => URL
-  -> Protocols
-  -> (WebSocket m -> action)
-  -> Sub action model
-websocketSub (URL u) (Protocols ps) f getModel sink = do
-  socket <- createWebSocket u ps
-  writeIORef websocket (Just socket)
-  void . forkIO $ handleReconnect
-  onOpen socket =<< do
-    writeIORef closedCode Nothing
-    asyncCallback $ sink (f WebSocketOpen)
-  onMessage socket =<< do
-    asyncCallback1 $ \v -> do
-      d <- parse =<< getData v
-      sink $ f (WebSocketMessage d)
-  onClose socket =<< do
-    asyncCallback1 $ \e -> do
-      code <- codeToCloseCode <$> getCode e
-      writeIORef closedCode (Just code)
-      reason <- getReason e
-      clean <- wasClean e
-      sink $ f (WebSocketClose code clean reason)
-  onError socket =<< do
-    asyncCallback1 $ \v -> do
-      writeIORef closedCode Nothing
-      d <- parse =<< getData v
-      sink $ f (WebSocketError d)
-  where
-    handleReconnect = do
-      threadDelay (secs 3)
-      Just s <- readIORef websocket
-      status <- getSocketState' s
-      code <- readIORef closedCode
-      if status == 3
-        then do
-          unless (code == Just CLOSE_NORMAL) $
-            websocketSub (URL u) (Protocols ps) f getModel sink
-        else handleReconnect
-
--- | Sends message to a websocket server
-send :: ToJSON a => a -> IO ()
-{-# INLINE send #-}
-send x = do
-  Just socket <- readIORef websocket
-  sendJson' socket x
-
--- | Connects to a websocket server
-connect :: URL -> Protocols -> IO ()
-{-# INLINE connect #-}
-connect (URL url') (Protocols ps) = do
-  Just ws <- readIORef websocket
-  s <- getSocketState' ws
-  when (s == 3) $ do
-    socket <- createWebSocket url' ps
-    atomicWriteIORef websocket (Just socket)
-
--- | URL of Websocket server
-newtype URL = URL MisoString
-  deriving (Show, Eq)
-
--- | Protocols for Websocket connection
-newtype Protocols = Protocols [MisoString]
-  deriving (Show, Eq)
-
--- | Wether or not the connection closed was done so cleanly
-newtype WasClean = WasClean Bool deriving (Show, Eq)
-
--- | Reason for closed connection
-newtype Reason = Reason MisoString deriving (Show, Eq)
-
-foreign import javascript unsafe "$r = new WebSocket($1, $2);"
-  createWebSocket' :: JSString -> JSVal -> IO Socket
-
-foreign import javascript unsafe "$r = $1.readyState;"
-  getSocketState' :: Socket -> IO Int
+-- | Information received when a WebSocket closes.
+data WebSocketClosedEvent = WebSocketClosedEvent {
+  closedCode :: CloseCode,
+  closedCleanly :: Bool,
+  closedReason :: MisoString
+  }
+  deriving (Show, Eq, Generic)
 
 -- | `SocketState` corresponding to current WebSocket connection
 data SocketState
-  = CONNECTING -- ^ 0
-  | OPEN       -- ^ 1
-  | CLOSING    -- ^ 2
-  | CLOSED     -- ^ 3
+  = WEBSOCKET_CONNECTING -- ^ 0
+  | WEBSOCKET_OPEN       -- ^ 1
+  | WEBSOCKET_CLOSING    -- ^ 2
+  | WEBSOCKET_CLOSED     -- ^ 3
   deriving (Show, Eq, Ord, Enum)
-
--- | Retrieves current status of `WebSocket`
-getSocketState :: IO SocketState
-getSocketState = do
-  Just ws <- readIORef websocket
-  toEnum <$> getSocketState' ws
-
-foreign import javascript unsafe "$1.send($2);"
-  send' :: Socket -> JSString -> IO ()
-
-sendJson' :: ToJSON json => Socket -> json -> IO ()
-sendJson' socket m = send' socket =<< stringify m
-
-createWebSocket :: JSString -> [JSString] -> IO Socket
-{-# INLINE createWebSocket #-}
-createWebSocket url' protocols =
-  createWebSocket' url' =<< toJSVal protocols
-
-foreign import javascript unsafe "$1.onopen = $2"
-  onOpen :: Socket -> Callback (IO ()) -> IO ()
-
-foreign import javascript unsafe "$1.onclose = $2"
-  onClose :: Socket -> Callback (JSVal -> IO ()) -> IO ()
-
-foreign import javascript unsafe "$1.onmessage = $2"
-  onMessage :: Socket -> Callback (JSVal -> IO ()) -> IO ()
-
-foreign import javascript unsafe "$1.onerror = $2"
-  onError :: Socket -> Callback (JSVal -> IO ()) -> IO ()
-
-foreign import javascript unsafe "$r = $1.data"
-  getData :: JSVal -> IO JSVal
-
-foreign import javascript unsafe "$r = $1.wasClean"
-  wasClean :: JSVal -> IO WasClean
-
-foreign import javascript unsafe "$r = $1.code"
-  getCode :: JSVal -> IO Int
-
-foreign import javascript unsafe "$r = $1.reason"
-  getReason :: JSVal -> IO Reason
-
-newtype Socket = Socket JSVal
 
 -- | Code corresponding to a closed connection
 -- https://developer.mozilla.org/en-US/docs/Web/API/CloseEvent
@@ -232,21 +119,140 @@ data CloseCode
 instance ToJSVal CloseCode
 instance FromJSVal CloseCode
 
+-- | Create a new websocket.
+createWebSocket :: MisoString -> IO WebSocket
+{-# INLINE createWebSocket #-}
+createWebSocket url' = createWebSocket' url' =<< toJSVal ("" :: String)
+
+-- | Close a websocket with the default code (1000)
+closeWebSocket :: WebSocket -> IO ()
+closeWebSocket = closeWebSocketWithCode 1000
+
+-- | Default handler for a closed event. Attempts to reconnect if
+-- | close was abnormal.
+reconnectIfAbnormal :: WebSocketClosedEvent -> IO Bool
+reconnectIfAbnormal event = pure (closedCode event /= CLOSE_NORMAL)
+
+-- | WebSocket subscription
+websocketSub
+  :: FromJSON message
+  => MisoString -- ^ Subscription URI
+  -> (WebSocketEvent message -> action) -- ^ Message handler
+  -> Sub action model -- ^ A subscription
+websocketSub uri handler getModel writeEvent = do
+  socket <- createWebSocket uri
+  websocketSubFromWebSocket socket handler reconnectIfAbnormal getModel writeEvent
+
+-- | WebSocket subscription, given a particular websocket.
+websocketSubFromWebSocket
+  :: FromJSON message
+  => WebSocket -- ^ Handle to the socket.
+  -> (WebSocketEvent message -> action) -- ^ Event handler.
+  -> (WebSocketClosedEvent -> IO Bool) -- ^ Decide whether to reconnect on close.
+  -> Sub action model
+websocketSubFromWebSocket socket handler shouldReconnect getModel writeEvent = do
+  -- Will receive a value when the socket closes.
+  closedEventMV <- newEmptyMVar
+
+  -- Spin off the reconnection thread
+  void $ forkIO $ do
+    takeMVar closedEventMV >>= shouldReconnect >>= \case
+      False -> pure () -- Don't reconnect, just return.
+      True -> do
+        newSocket <- createWebSocket (getSocketURL socket)
+        websocketSubFromWebSocket newSocket handler shouldReconnect
+                                  getModel writeEvent
+
+  -- Set up event handlers on the socket
+  onOpen socket =<< do
+    asyncCallback (writeEvent (handler WebSocketOpen))
+
+  onMessage socket =<< do
+    asyncCallback1 $ \v -> do
+      d <- parse =<< getData v
+      writeEvent $ handler (WebSocketMessage d)
+
+  onClose socket =<< do
+    asyncCallback1 $ \e -> do
+      closedCode <- codeToCloseCode <$> getCode e
+      closedReason <- getReason e
+      closedCleanly <- wasClean e
+      let closedEvent = WebSocketClosedEvent {..}
+      writeEvent $ handler (WebSocketClosed closedEvent)
+      putMVar closedEventMV closedEvent
+
+  onError socket =<< do
+    asyncCallback1 $ \v -> do
+      d <- parse =<< getData v
+      writeEvent $ handler (WebSocketError d)
+
+-- | Retrieves current status of `socket`
+getSocketState :: WebSocket -> IO SocketState
+getSocketState socket = toEnum <$> getSocketState' socket
+
+-- | Send a JSON-able message to a websocket.
+sendJsonToWebSocket :: ToJSON json => WebSocket -> json -> IO ()
+sendJsonToWebSocket socket m = send' socket =<< stringify m
+
+-- | Convert a numeric close code to the enumerated type.
 codeToCloseCode :: Int -> CloseCode
-codeToCloseCode = go
-  where
-    go 1000 = CLOSE_NORMAL
-    go 1001 = CLOSE_GOING_AWAY
-    go 1002 = CLOSE_PROTOCOL_ERROR
-    go 1003 = CLOSE_UNSUPPORTED
-    go 1005 = CLOSE_NO_STATUS
-    go 1006 = CLOSE_ABNORMAL
-    go 1007 = Unsupported_Data
-    go 1008 = Policy_Violation
-    go 1009 = CLOSE_TOO_LARGE
-    go 1010 = Missing_Extension
-    go 1011 = Internal_Error
-    go 1012 = Service_Restart
-    go 1013 = Try_Again_Later
-    go 1015 = TLS_Handshake
-    go n    = OtherCode n
+codeToCloseCode = \case
+  1000 -> CLOSE_NORMAL
+  1001 -> CLOSE_GOING_AWAY
+  1002 -> CLOSE_PROTOCOL_ERROR
+  1003 -> CLOSE_UNSUPPORTED
+  1005 -> CLOSE_NO_STATUS
+  1006 -> CLOSE_ABNORMAL
+  1007 -> Unsupported_Data
+  1008 -> Policy_Violation
+  1009 -> CLOSE_TOO_LARGE
+  1010 -> Missing_Extension
+  1011 -> Internal_Error
+  1012 -> Service_Restart
+  1013 -> Try_Again_Later
+  1015 -> TLS_Handshake
+  n    -> OtherCode n
+
+
+--------------------------------------------------------------------------------
+-- * FFI
+--------------------------------------------------------------------------------
+
+foreign import javascript unsafe "$1.send($2);"
+  send' :: WebSocket -> JSString -> IO ()
+
+foreign import javascript unsafe "$r = new WebSocket($1, $2);"
+  createWebSocket' :: JSString -> JSVal -> IO WebSocket
+
+foreign import javascript unsafe "$2.close($1);"
+  closeWebSocketWithCode :: Int -> WebSocket -> IO ()
+
+foreign import javascript unsafe "$r = $1.readyState;"
+  getSocketState' :: WebSocket -> IO Int
+
+foreign import javascript unsafe "$r = $1.url;"
+  getSocketURL :: WebSocket -> MisoString
+
+foreign import javascript unsafe "$1.onopen = $2"
+  onOpen :: WebSocket -> Callback (IO ()) -> IO ()
+
+foreign import javascript unsafe "$1.onclose = $2"
+  onClose :: WebSocket -> Callback (JSVal -> IO ()) -> IO ()
+
+foreign import javascript unsafe "$1.onmessage = $2"
+  onMessage :: WebSocket -> Callback (JSVal -> IO ()) -> IO ()
+
+foreign import javascript unsafe "$1.onerror = $2"
+  onError :: WebSocket -> Callback (JSVal -> IO ()) -> IO ()
+
+foreign import javascript unsafe "$r = $1.data"
+  getData :: JSVal -> IO JSVal
+
+foreign import javascript unsafe "$r = $1.wasClean"
+  wasClean :: JSVal -> IO Bool
+
+foreign import javascript unsafe "$r = $1.code"
+  getCode :: JSVal -> IO Int
+
+foreign import javascript unsafe "$r = $1.reason"
+  getReason :: JSVal -> IO MisoString
