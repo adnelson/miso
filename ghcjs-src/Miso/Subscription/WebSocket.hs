@@ -48,6 +48,7 @@ import Control.Concurrent      (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Monad
 import Data.Aeson
+import Data.IORef (IORef, newIORef, writeIORef, readIORef)
 import GHC.Generics
 import GHCJS.Foreign.Callback
 import GHCJS.Marshal
@@ -58,13 +59,21 @@ import Miso.FFI                (parse, stringify)
 import Miso.Html.Internal      (Sub)
 import Miso.String
 
--- | WebSocket data type
-newtype WebSocket = WebSocket JSVal
+-- | High-level WebSocket datatype.
+-- Wraps the low-level value in an IORef to hide reconnection.
+data WebSocket = WebSocket {
+  getSocketURL :: !MisoString,
+  wsProtocols :: ![MisoString],
+  wsSocketRef :: !(IORef WebSocket_)
+  } deriving (Eq)
+
+-- | WebSocket_ data type, wrapper around the JSVal.
+newtype WebSocket_ = WebSocket_ JSVal
 
 instance Show WebSocket where
   show ws = "WebSocket(" <> show (getSocketURL ws) <> ")"
 
-instance Eq WebSocket where
+instance Eq WebSocket_ where
   (==) = webSocketsEqual'
 
 -- | WebSocket connection messages. The `message` type should be a
@@ -153,18 +162,35 @@ data CloseCode
 instance ToJSVal CloseCode
 instance FromJSVal CloseCode
 
--- | Create a new websocket.
-newWebSocket :: MisoString -> IO (Either MisoString WebSocket)
-{-# INLINE newWebSocket #-}
-newWebSocket url' = do
-  result <- newWebSocketOrError' url' =<< toJSVal ("" :: MisoString)
+-- | Create a new low-level websocket.
+newWebSocket_ :: MisoString -> [MisoString] -> IO (Either MisoString WebSocket_)
+{-# INLINE newWebSocket_ #-}
+newWebSocket_ url protocols = do
+  result <- newWebSocketOrError' url =<< toJSVal protocols
   case isWebSocket' result of
-    True -> pure (Right (WebSocket result))
+    True -> pure (Right (WebSocket_ result))
     False -> Left <$> getExceptionMessage' result
 
--- | Close a websocket with the default code (1000)
+-- | Create a new high-level websocket.
+newWebSocketWithProtocols
+  :: MisoString -> [MisoString] -> IO (Either MisoString WebSocket)
+{-# INLINE newWebSocketWithProtocols #-}
+newWebSocketWithProtocols url protocols = newWebSocket_ url protocols >>= \case
+  Left err -> pure (Left err)
+  Right socket_ -> Right . WebSocket url protocols <$> newIORef socket_
+
+-- | Create a new high-level websocket with an empty protocol list
+newWebSocket :: MisoString -> IO (Either MisoString WebSocket)
+{-# INLINE newWebSocket #-}
+newWebSocket = flip newWebSocketWithProtocols []
+
+-- | Close a high-level websocket.
 closeWebSocket :: WebSocket -> IO ()
-closeWebSocket = closeWebSocketWithCode 1000
+closeWebSocket (WebSocket _ _ ref) = readIORef ref >>= closeWebSocket_
+
+-- | Close a websocket with the default code (1000)
+closeWebSocket_ :: WebSocket_ -> IO ()
+closeWebSocket_ = closeWebSocketWithCode 1000
 
 -- | Default handler for a closed event. Attempts to reconnect if
 -- | close was abnormal.
@@ -196,22 +222,27 @@ websocketSubWithCloseHandler socket handler handleClose getModel writeEvent = do
   void $ forkIO $ do
     reconnect <- takeMVar closedEventMV >>= handleClose
     when reconnect $ do
-      socketOrErr <- newWebSocket (getSocketURL socket)
+      let (url, protocols) = (getSocketURL socket, wsProtocols socket)
+      socketOrErr <- newWebSocket_ url protocols
       case socketOrErr of
-        Right ws -> websocketSubWithCloseHandler ws handler handleClose
-                                                 getModel writeEvent
-        Left err -> putStrLn (show err)
+        Right ws -> do
+          setSocket_ socket ws
+          websocketSubWithCloseHandler socket handler handleClose
+                                       getModel writeEvent
+        Left err -> putStrLn $ "Error when reconnecting to websocket "
+                            <> show socket <> ": " <> show err
 
   -- Set up event handlers on the socket
-  onOpen socket =<< do
+  socket_ <- getSocket_ socket
+  onOpen socket_ =<< do
     asyncCallback (writeEvent (handler WebSocketOpen))
 
-  onMessage socket =<< do
+  onMessage socket_ =<< do
     asyncCallback1 $ \v -> do
       d <- parse =<< getData v
       writeEvent $ handler (WebSocketMessage d)
 
-  onClose socket =<< do
+  onClose socket_ =<< do
     asyncCallback1 $ \e -> do
       closedCode <- codeToCloseCode <$> getCode e
       closedReason <- getReason e
@@ -220,18 +251,28 @@ websocketSubWithCloseHandler socket handler handleClose getModel writeEvent = do
       writeEvent $ handler (WebSocketClosed closedEvent)
       putMVar closedEventMV closedEvent
 
-  onError socket =<< do
+  onError socket_ =<< do
     asyncCallback1 $ \v -> do
       d <- parse =<< getData v
       writeEvent $ handler (WebSocketError d)
 
+-- | Read the IORef in a WebSocket to get its WebSocket_
+getSocket_ :: WebSocket -> IO WebSocket_
+getSocket_ = readIORef . wsSocketRef
+
+-- | Set the IORef on a WebSocket.
+setSocket_ :: WebSocket -> WebSocket_ -> IO ()
+setSocket_ ws ws_ = writeIORef (wsSocketRef ws) ws_
+
 -- | Retrieves current status of `socket`
 getSocketState :: WebSocket -> IO SocketState
-getSocketState socket = toEnum <$> getSocketState' socket
+getSocketState socket = toEnum <$> (getSocketState' =<< getSocket_ socket)
 
 -- | Send a JSON-able message to a websocket.
 sendJsonToWebSocket :: ToJSON json => WebSocket -> json -> IO ()
-sendJsonToWebSocket socket m = send' socket =<< stringify m
+sendJsonToWebSocket socket m = do
+  socket_ <- getSocket_ socket
+  send' socket_ =<< stringify m
 
 -- | Convert a numeric close code to the enumerated type.
 codeToCloseCode :: Int -> CloseCode
@@ -258,17 +299,17 @@ codeToCloseCode = \case
 --------------------------------------------------------------------------------
 
 foreign import javascript unsafe "$1.send($2);"
-  send' :: WebSocket -> JSString -> IO ()
+  send' :: WebSocket_ -> JSString -> IO ()
 
 foreign import javascript unsafe
   "try { $r = new WebSocket($1, $2); } catch (e) { $r = e; }"
   newWebSocketOrError' :: JSString -> JSVal -> IO JSVal
 
 foreign import javascript unsafe "$2.close($1);"
-  closeWebSocketWithCode :: Int -> WebSocket -> IO ()
+  closeWebSocketWithCode :: Int -> WebSocket_ -> IO ()
 
 foreign import javascript unsafe "$r = $1.readyState;"
-  getSocketState' :: WebSocket -> IO Int
+  getSocketState' :: WebSocket_ -> IO Int
 
 -- | Use this to figure out if websocket creation was successful.
 foreign import javascript safe "$r = typeof $1 === 'string';"
@@ -278,21 +319,17 @@ foreign import javascript safe "$r = typeof $1 === 'string';"
 foreign import javascript safe "$r = $1.message;"
   getExceptionMessage' :: JSVal -> IO MisoString
 
--- | This is a read-only attribute so we can access it without IO.
-foreign import javascript unsafe "$r = $1.url;"
-  getSocketURL :: WebSocket -> MisoString
-
 foreign import javascript unsafe "$1.onopen = $2"
-  onOpen :: WebSocket -> Callback (IO ()) -> IO ()
+  onOpen :: WebSocket_ -> Callback (IO ()) -> IO ()
 
 foreign import javascript unsafe "$1.onclose = $2"
-  onClose :: WebSocket -> Callback (JSVal -> IO ()) -> IO ()
+  onClose :: WebSocket_ -> Callback (JSVal -> IO ()) -> IO ()
 
 foreign import javascript unsafe "$1.onmessage = $2"
-  onMessage :: WebSocket -> Callback (JSVal -> IO ()) -> IO ()
+  onMessage :: WebSocket_ -> Callback (JSVal -> IO ()) -> IO ()
 
 foreign import javascript unsafe "$1.onerror = $2"
-  onError :: WebSocket -> Callback (JSVal -> IO ()) -> IO ()
+  onError :: WebSocket_ -> Callback (JSVal -> IO ()) -> IO ()
 
 foreign import javascript unsafe "$r = $1.data"
   getData :: JSVal -> IO JSVal
@@ -307,4 +344,4 @@ foreign import javascript unsafe "$r = $1.reason"
   getReason :: JSVal -> IO MisoString
 
 foreign import javascript unsafe "$r = ($1 === $2);"
-  webSocketsEqual' :: WebSocket -> WebSocket -> Bool
+  webSocketsEqual' :: WebSocket_ -> WebSocket_ -> Bool
