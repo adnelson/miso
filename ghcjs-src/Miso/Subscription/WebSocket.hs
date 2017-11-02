@@ -5,6 +5,7 @@
 {-# LANGUAGE RankNTypes                 #-}
 {-# LANGUAGE LambdaCase                 #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE RecordWildCards            #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Miso.Subscription.WebSocket
@@ -21,9 +22,13 @@ module Miso.Subscription.WebSocket
   , WebSocketClosedEvent (..)
   , SocketState          (..)
   , CloseCode            (..)
+
     -- * Subscription
   , websocketSub
-  , websocketSubFromWebSocket
+  , websocketSubWithCloseHandler
+
+    -- * Creating a websocket
+  , newWebSocket
 
     -- * Interacting with the websocket
   , sendJsonToWebSocket
@@ -56,6 +61,12 @@ import Miso.String
 -- | WebSocket data type
 newtype WebSocket = WebSocket JSVal
 
+instance Show WebSocket where
+  show ws = "WebSocket(" <> show (getSocketURL ws) <> ")"
+
+instance Eq WebSocket where
+  (==) = webSocketsEqual'
+
 -- | WebSocket connection messages. The `message` type should be a
 -- | `FromJSON` instance.
 data WebSocketEvent message
@@ -84,34 +95,57 @@ data SocketState
 -- | Code corresponding to a closed connection
 -- https://developer.mozilla.org/en-US/docs/Web/API/CloseEvent
 data CloseCode
-  = CLOSE_NORMAL
-   -- ^ 1000, Normal closure; the connection successfully completed whatever purpose for which it was created.
-  | CLOSE_GOING_AWAY
-   -- ^ 1001, The endpoint is going away, either because of a server failure or because the browser is navigating away from the page that opened the connection.
-  | CLOSE_PROTOCOL_ERROR
-   -- ^ 1002, The endpoint is terminating the connection due to a protocol error.
-  | CLOSE_UNSUPPORTED
-   -- ^ 1003, The connection is being terminated because the endpoint received data of a type it cannot accept (for example, a textonly endpoint received binary data).
-  | CLOSE_NO_STATUS
-   -- ^ 1005, Reserved.  Indicates that no status code was provided even though one was expected.
-  | CLOSE_ABNORMAL
-   -- ^ 1006, Reserved. Used to indicate that a connection was closed abnormally (that is, with no close frame being sent) when a status code is expected.
+  = Normal_Closure
+   -- ^ 1000, Normal closure; the connection successfully completed
+   -- whatever purpose for which it was created.
+  | Going_Away
+   -- ^ 1001, The endpoint is going away, either because of a server
+   -- failure or because the browser is navigating away from the page
+   -- that opened the connection.
+  | Protocol_Error
+   -- ^ 1002, The endpoint is terminating the connection due to a
+   -- protocol error.
   | Unsupported_Data
-   -- ^ 1007, The endpoint is terminating the connection because a message was received that contained inconsistent data (e.g., nonUTF8 data within a text message).
+   -- ^ 1003, The connection is being terminated because the endpoint
+   -- received data of a type it cannot accept (for example, a
+   -- textonly endpoint received binary data).
+  | No_Status_Recvd
+   -- ^ 1005, Reserved.  Indicates that no status code was provided
+   -- even though one was expected.
+  | Abnormal_Closure
+   -- ^ 1006, Reserved. Used to indicate that a connection was closed
+   -- abnormally (that is, with no close frame being sent) when a
+   -- status code is expected.
+  | Invalid_Frame_Payload_Data
+   -- ^ 1007, The endpoint is terminating the connection because a
+   -- message was received that contained inconsistent data (e.g.,
+   -- nonUTF8 data within a text message).
   | Policy_Violation
-   -- ^ 1008, The endpoint is terminating the connection because it received a message that violates its policy. This is a generic status code, used when codes 1003 and 1009 are not suitable.
-  | CLOSE_TOO_LARGE
-   -- ^ 1009, The endpoint is terminating the connection because a data frame was received that is too large.
+   -- ^ 1008, The endpoint is terminating the connection because it
+   -- received a message that violates its policy. This is a generic
+   -- status code, used when codes 1003 and 1009 are not suitable.
+  | Message_Too_Big
+   -- ^ 1009, The endpoint is terminating the connection because a
+   -- data frame was received that is too large.
   | Missing_Extension
-   -- ^ 1010, The client is terminating the connection because it expected the server to negotiate one or more extension, but the server didn't.
+   -- ^ 1010, The client is terminating the connection because it
+   -- expected the server to negotiate one or more extension, but the
+   -- server didn't.
   | Internal_Error
-   -- ^ 1011, The server is terminating the connection because it encountered an unexpected condition that prevented it from fulfilling the request.
+   -- ^ 1011, The server is terminating the connection because it
+   -- encountered an unexpected condition that prevented it from
+   -- fulfilling the request.
   | Service_Restart
-   -- ^ 1012, The server is terminating the connection because it is restarting.
+   -- ^ 1012, The server is terminating the connection because it is
+   -- restarting.
   | Try_Again_Later
-   -- ^ 1013, The server is terminating the connection due to a temporary condition, e.g. it is overloaded and is casting off some of its clients.
+   -- ^ 1013, The server is terminating the connection due to a
+   -- temporary condition, e.g. it is overloaded and is casting off
+   -- some of its clients.
   | TLS_Handshake
-   -- ^ 1015, Reserved. Indicates that the connection was closed due to a failure to perform a TLS handshake (e.g., the server certificate can't be verified).
+   -- ^ 1015, Reserved. Indicates that the connection was closed due
+   -- to a failure to perform a TLS handshake (e.g., the server
+   -- certificate can't be verified).
   | OtherCode Int
    -- ^ OtherCode that is reserved and not in the range 0999
   deriving (Show, Eq, Generic)
@@ -120,9 +154,13 @@ instance ToJSVal CloseCode
 instance FromJSVal CloseCode
 
 -- | Create a new websocket.
-createWebSocket :: MisoString -> IO WebSocket
-{-# INLINE createWebSocket #-}
-createWebSocket url' = createWebSocket' url' =<< toJSVal ("" :: String)
+newWebSocket :: MisoString -> IO (Either MisoString WebSocket)
+{-# INLINE newWebSocket #-}
+newWebSocket url' = do
+  result <- newWebSocketOrError' url' =<< toJSVal ("" :: MisoString)
+  case isWebSocket' result of
+    True -> pure (Right (WebSocket result))
+    False -> Left <$> getExceptionMessage' result
 
 -- | Close a websocket with the default code (1000)
 closeWebSocket :: WebSocket -> IO ()
@@ -131,37 +169,38 @@ closeWebSocket = closeWebSocketWithCode 1000
 -- | Default handler for a closed event. Attempts to reconnect if
 -- | close was abnormal.
 reconnectIfAbnormal :: WebSocketClosedEvent -> IO Bool
-reconnectIfAbnormal event = pure (closedCode event /= CLOSE_NORMAL)
+reconnectIfAbnormal event = pure (closedCode event /= Normal_Closure)
 
 -- | WebSocket subscription
 websocketSub
   :: FromJSON message
-  => MisoString -- ^ Subscription URI
+  => WebSocket
   -> (WebSocketEvent message -> action) -- ^ Message handler
   -> Sub action model -- ^ A subscription
-websocketSub uri handler getModel writeEvent = do
-  socket <- createWebSocket uri
-  websocketSubFromWebSocket socket handler reconnectIfAbnormal getModel writeEvent
+websocketSub socket handler getModel writeEvent = do
+  websocketSubWithCloseHandler socket handler reconnectIfAbnormal
+                               getModel writeEvent
 
--- | WebSocket subscription, given a particular websocket.
-websocketSubFromWebSocket
+-- | WebSocket subscription, given a particular handler for closing events.
+websocketSubWithCloseHandler
   :: FromJSON message
   => WebSocket -- ^ Handle to the socket.
   -> (WebSocketEvent message -> action) -- ^ Event handler.
   -> (WebSocketClosedEvent -> IO Bool) -- ^ Decide whether to reconnect on close.
   -> Sub action model
-websocketSubFromWebSocket socket handler shouldReconnect getModel writeEvent = do
+websocketSubWithCloseHandler socket handler handleClose getModel writeEvent = do
   -- Will receive a value when the socket closes.
   closedEventMV <- newEmptyMVar
 
   -- Spin off the reconnection thread
   void $ forkIO $ do
-    takeMVar closedEventMV >>= shouldReconnect >>= \case
-      False -> pure () -- Don't reconnect, just return.
-      True -> do
-        newSocket <- createWebSocket (getSocketURL socket)
-        websocketSubFromWebSocket newSocket handler shouldReconnect
-                                  getModel writeEvent
+    reconnect <- takeMVar closedEventMV >>= handleClose
+    when reconnect $ do
+      socketOrErr <- newWebSocket (getSocketURL socket)
+      case socketOrErr of
+        Right ws -> websocketSubWithCloseHandler ws handler handleClose
+                                                 getModel writeEvent
+        Left err -> putStrLn (show err)
 
   -- Set up event handlers on the socket
   onOpen socket =<< do
@@ -197,15 +236,15 @@ sendJsonToWebSocket socket m = send' socket =<< stringify m
 -- | Convert a numeric close code to the enumerated type.
 codeToCloseCode :: Int -> CloseCode
 codeToCloseCode = \case
-  1000 -> CLOSE_NORMAL
-  1001 -> CLOSE_GOING_AWAY
-  1002 -> CLOSE_PROTOCOL_ERROR
-  1003 -> CLOSE_UNSUPPORTED
-  1005 -> CLOSE_NO_STATUS
-  1006 -> CLOSE_ABNORMAL
-  1007 -> Unsupported_Data
+  1000 -> Normal_Closure
+  1001 -> Going_Away
+  1002 -> Protocol_Error
+  1003 -> Unsupported_Data
+  1005 -> No_Status_Recvd
+  1006 -> Abnormal_Closure
+  1007 -> Invalid_Frame_Payload_Data
   1008 -> Policy_Violation
-  1009 -> CLOSE_TOO_LARGE
+  1009 -> Message_Too_Big
   1010 -> Missing_Extension
   1011 -> Internal_Error
   1012 -> Service_Restart
@@ -221,8 +260,9 @@ codeToCloseCode = \case
 foreign import javascript unsafe "$1.send($2);"
   send' :: WebSocket -> JSString -> IO ()
 
-foreign import javascript unsafe "$r = new WebSocket($1, $2);"
-  createWebSocket' :: JSString -> JSVal -> IO WebSocket
+foreign import javascript unsafe
+  "try { $r = new WebSocket($1, $2); } catch (e) { $r = e; }"
+  newWebSocketOrError' :: JSString -> JSVal -> IO JSVal
 
 foreign import javascript unsafe "$2.close($1);"
   closeWebSocketWithCode :: Int -> WebSocket -> IO ()
@@ -230,6 +270,15 @@ foreign import javascript unsafe "$2.close($1);"
 foreign import javascript unsafe "$r = $1.readyState;"
   getSocketState' :: WebSocket -> IO Int
 
+-- | Use this to figure out if websocket creation was successful.
+foreign import javascript safe "$r = typeof $1 === 'string';"
+  isWebSocket' :: JSVal -> Bool
+
+-- | Get the message off of the exception so that we can return it.
+foreign import javascript safe "$r = $1.message;"
+  getExceptionMessage' :: JSVal -> IO MisoString
+
+-- | This is a read-only attribute so we can access it without IO.
 foreign import javascript unsafe "$r = $1.url;"
   getSocketURL :: WebSocket -> MisoString
 
@@ -256,3 +305,6 @@ foreign import javascript unsafe "$r = $1.code"
 
 foreign import javascript unsafe "$r = $1.reason"
   getReason :: JSVal -> IO MisoString
+
+foreign import javascript unsafe "$r = ($1 === $2);"
+  webSocketsEqual' :: WebSocket -> WebSocket -> Bool
