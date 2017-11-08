@@ -17,9 +17,6 @@ import           Data.Bool
 import qualified Data.Map as M
 
 import           Miso
-import           Miso.Subscription.WebSocket (newWebSocket,
-                                              websocketSub,
-                                              sendJsonToWebSocket)
 import           Miso.String  (MisoString)
 import qualified Miso.String  as S
 
@@ -35,9 +32,9 @@ main = do
   startApp App { initialAction = Id, ..}
 
 updateModel :: WebSocket -> Action -> Model -> Effect Action Model
-updateModel socket action model = case action of
+updateModel ws action model = case action of
   HandleWebSocket (WebSocketMessage (Message m)) -> pure model {received = m}
-  SendMessage msg -> model <# do Id <$ sendJsonToWebSocket socket msg
+  SendMessage msg -> model <# do Id <$ sendJsonToWebSocket ws msg
   UpdateMessage m -> pure model { msg = Message m }
   _ -> pure model
 

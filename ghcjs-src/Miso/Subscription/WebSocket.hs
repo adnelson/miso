@@ -20,15 +20,18 @@ module Miso.Subscription.WebSocket
     WebSocket
   , WebSocketEvent       (..)
   , WebSocketClosedEvent (..)
+  , WebSocketConfig      (..)
+  , PingConfig           (..)
   , SocketState          (..)
   , CloseCode            (..)
 
     -- * Subscription
   , websocketSub
-  , websocketSubWithCloseHandler
+  , websocketSubWithConfig
 
     -- * Creating a websocket
   , newWebSocket
+  , newWebSocketWithProtocols
 
     -- * Interacting with the websocket
   , sendJsonToWebSocket
@@ -38,53 +41,77 @@ module Miso.Subscription.WebSocket
 
     -- * Querying the socket
   , getSocketState
-  , getSocketURL
+  , wsURL
 
-    -- * Handling a close event
-  , reconnectIfAbnormal
+    -- * Configuration
+  , defaultWSConfig
+  , defaultPingConfig
   ) where
 
 import Prelude
-import Control.Concurrent      (forkIO)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent      (forkIO, killThread, threadDelay)
+import Control.Concurrent.MVar (MVar, putMVar, takeMVar, newMVar,
+                                tryTakeMVar, readMVar)
 import Control.Monad
 import Data.Aeson
-import Data.IORef (IORef, newIORef, writeIORef, readIORef)
 import GHC.Generics
 import GHCJS.Foreign.Callback
 import GHCJS.Marshal
 import GHCJS.Types
 import Prelude                 hiding (map)
 
-import Miso.FFI                (parse, stringify)
+import Miso.FFI                (stringify, safeParseString)
 import Miso.Html.Internal      (Sub)
-import Miso.String
+import Miso.String             hiding (concat)
 
--- | High-level WebSocket datatype.
--- Wraps the low-level value in an IORef to hide reconnection.
-data WebSocket = WebSocket {
-  getSocketURL :: !MisoString,
-  wsProtocols :: ![MisoString],
-  wsSocketRef :: !(IORef WebSocket_)
-  } deriving (Eq)
-
--- | WebSocket_ data type, wrapper around the JSVal.
-newtype WebSocket_ = WebSocket_ JSVal
-
-instance Show WebSocket where
-  show ws = "WebSocket(" <> show (getSocketURL ws) <> ")"
-
-instance Eq WebSocket_ where
-  (==) = webSocketsEqual'
 
 -- | WebSocket connection messages. The `message` type should be a
 -- | `FromJSON` instance.
 data WebSocketEvent message
   = WebSocketMessage message
+  | WebSocketConnectFailed {failedUrl :: MisoString,
+                            failedProtocols :: [MisoString],
+                            failedMessage :: MisoString}
+  | WebSocketUnparseableMessage {unparsableMsgData::MisoString,
+                                 unparseableErrorMsg::MisoString}
   | WebSocketClosed WebSocketClosedEvent
   | WebSocketOpen
   | WebSocketError MisoString
   deriving (Show, Eq, Generic)
+
+-- | High-level WebSocket datatype.
+-- The internal websocket object is wrapped in an MVar because it
+-- could change (if the connection is restarted)
+data WebSocket = WebSocket {
+  wsURL       :: !MisoString,
+  wsProtocols :: ![MisoString],
+  wsSocketRef :: !(MVar WebSocket_)
+  } deriving (Eq)
+
+
+instance Show WebSocket where
+  show ws = "WebSocket(" <> show (wsURL ws) <> ")"
+
+-- | Ping configuration, if you want to keep your websocket active.
+data PingConfig = PingConfig {
+  -- | How many seconds to wait between pings.
+  pingSeconds :: Int,
+  -- | Message to send in the ping.
+  pingSend :: MisoString,
+  -- | Expect this message in response.
+  pingReceive :: MisoString
+  }
+
+-- | Configuration for websocket connection.
+data WebSocketConfig = WebSocketConfig {
+  -- | If @Just (n, msg)@, will send a ping message @msg@ every @n@ seconds.
+  websocketPing :: Maybe PingConfig,
+  -- | Decide whether to reconnect when the websocket closes.
+  -- | If this returns true, the websocket will be attempted to be
+  -- | reconnected. If false, the action handler for WebSocketClosed will be
+  -- | triggered with the given event.
+  websocketShouldReconnectOnClose :: WebSocketClosedEvent -> IO Bool
+  }
 
 -- | Information received when a WebSocket closes.
 data WebSocketClosedEvent = WebSocketClosedEvent {
@@ -96,79 +123,21 @@ data WebSocketClosedEvent = WebSocketClosedEvent {
 
 -- | `SocketState` corresponding to current WebSocket connection
 data SocketState
-  = WEBSOCKET_CONNECTING -- ^ 0
-  | WEBSOCKET_OPEN       -- ^ 1
-  | WEBSOCKET_CLOSING    -- ^ 2
-  | WEBSOCKET_CLOSED     -- ^ 3
+  = CONNECTING -- ^ 0
+  | OPEN       -- ^ 1
+  | CLOSING    -- ^ 2
+  | CLOSED     -- ^ 3
   deriving (Show, Eq, Ord, Enum)
 
--- | Code corresponding to a closed connection
--- https://developer.mozilla.org/en-US/docs/Web/API/CloseEvent
-data CloseCode
-  = Normal_Closure
-   -- ^ 1000, Normal closure; the connection successfully completed
-   -- whatever purpose for which it was created.
-  | Going_Away
-   -- ^ 1001, The endpoint is going away, either because of a server
-   -- failure or because the browser is navigating away from the page
-   -- that opened the connection.
-  | Protocol_Error
-   -- ^ 1002, The endpoint is terminating the connection due to a
-   -- protocol error.
-  | Unsupported_Data
-   -- ^ 1003, The connection is being terminated because the endpoint
-   -- received data of a type it cannot accept (for example, a
-   -- textonly endpoint received binary data).
-  | No_Status_Recvd
-   -- ^ 1005, Reserved.  Indicates that no status code was provided
-   -- even though one was expected.
-  | Abnormal_Closure
-   -- ^ 1006, Reserved. Used to indicate that a connection was closed
-   -- abnormally (that is, with no close frame being sent) when a
-   -- status code is expected.
-  | Invalid_Frame_Payload_Data
-   -- ^ 1007, The endpoint is terminating the connection because a
-   -- message was received that contained inconsistent data (e.g.,
-   -- nonUTF8 data within a text message).
-  | Policy_Violation
-   -- ^ 1008, The endpoint is terminating the connection because it
-   -- received a message that violates its policy. This is a generic
-   -- status code, used when codes 1003 and 1009 are not suitable.
-  | Message_Too_Big
-   -- ^ 1009, The endpoint is terminating the connection because a
-   -- data frame was received that is too large.
-  | Missing_Extension
-   -- ^ 1010, The client is terminating the connection because it
-   -- expected the server to negotiate one or more extension, but the
-   -- server didn't.
-  | Internal_Error
-   -- ^ 1011, The server is terminating the connection because it
-   -- encountered an unexpected condition that prevented it from
-   -- fulfilling the request.
-  | Service_Restart
-   -- ^ 1012, The server is terminating the connection because it is
-   -- restarting.
-  | Try_Again_Later
-   -- ^ 1013, The server is terminating the connection due to a
-   -- temporary condition, e.g. it is overloaded and is casting off
-   -- some of its clients.
-  | TLS_Handshake
-   -- ^ 1015, Reserved. Indicates that the connection was closed due
-   -- to a failure to perform a TLS handshake (e.g., the server
-   -- certificate can't be verified).
-  | OtherCode Int
-   -- ^ OtherCode that is reserved and not in the range 0999
-  deriving (Show, Eq, Generic)
-
-instance ToJSVal CloseCode
-instance FromJSVal CloseCode
+-- | Low-level websocket handle, wraps the raw JSVal.
+newtype WebSocket_ = WebSocket_ JSVal
 
 -- | Create a new low-level websocket.
 newWebSocket_ :: MisoString -> [MisoString] -> IO (Either MisoString WebSocket_)
 {-# INLINE newWebSocket_ #-}
 newWebSocket_ url protocols = do
   result <- newWebSocketOrError' url =<< toJSVal protocols
-  case isWebSocket' result of
+  isWebSocket' result >>= \case
     True -> pure (Right (WebSocket_ result))
     False -> Left <$> getExceptionMessage' result
 
@@ -178,7 +147,7 @@ newWebSocketWithProtocols
 {-# INLINE newWebSocketWithProtocols #-}
 newWebSocketWithProtocols url protocols = newWebSocket_ url protocols >>= \case
   Left err -> pure (Left err)
-  Right socket_ -> Right . WebSocket url protocols <$> newIORef socket_
+  Right socket_ -> Right . WebSocket url protocols <$> newMVar socket_
 
 -- | Create a new high-level websocket with an empty protocol list
 newWebSocket :: MisoString -> IO (Either MisoString WebSocket)
@@ -187,83 +156,115 @@ newWebSocket = flip newWebSocketWithProtocols []
 
 -- | Close a high-level websocket.
 closeWebSocket :: WebSocket -> IO ()
-closeWebSocket (WebSocket _ _ ref) = readIORef ref >>= closeWebSocket_
+closeWebSocket ws@(WebSocket _ _ ref) = tryTakeMVar ref >>= \case
+  Nothing -> putStrLn $ concat ["WebSocket ", show ws, " already closed"]
+  Just ws_ -> closeWebSocket_ ws_
 
 -- | Close a websocket with the default code (1000)
 closeWebSocket_ :: WebSocket_ -> IO ()
 closeWebSocket_ = closeWebSocketWithCode 1000
 
--- | Default handler for a closed event. Attempts to reconnect if
--- | close was abnormal.
-reconnectIfAbnormal :: WebSocketClosedEvent -> IO Bool
-reconnectIfAbnormal event = pure (closedCode event /= Normal_Closure)
+-- | Default ping config. Sends "ping" every 30 seconds and expects "pong".
+defaultPingConfig :: PingConfig
+defaultPingConfig = PingConfig 30 "ping" "pong"
 
--- | WebSocket subscription
+-- | Default websocket config.
+-- Doesn't set up a ping, and attempts to reconnect if close was abnormal.
+defaultWSConfig :: WebSocketConfig
+defaultWSConfig = WebSocketConfig {
+  websocketPing = Nothing,
+  websocketShouldReconnectOnClose = \event -> pure (not $ closedCleanly event)
+  }
+
+--------------------------------------------------------------------------------
+-- * Creating Subscriptions
+
+
+-- | WebSocket subscription with default configuration.
 websocketSub
   :: FromJSON message
-  => WebSocket
-  -> (WebSocketEvent message -> action) -- ^ Message handler
-  -> Sub action model -- ^ A subscription
-websocketSub socket handler getModel writeEvent = do
-  websocketSubWithCloseHandler socket handler reconnectIfAbnormal
-                               getModel writeEvent
+  => WebSocket                          -- ^ Handle to the socket.
+  -> (WebSocketEvent message -> action) -- ^ Message handler.
+  -> Sub action model                   -- ^ A subscription.
+websocketSub = websocketSubWithConfig defaultWSConfig
 
--- | WebSocket subscription, given a particular handler for closing events.
-websocketSubWithCloseHandler
+
+-- | WebSocket subscription, given a particular configuration.
+--
+-- If the socket disconnects, the config will be used to determine
+-- whether to reconnect; if so it happens seamlessly. If not, the
+-- WebSocketClosed event will be fired.
+websocketSubWithConfig
   :: FromJSON message
-  => WebSocket -- ^ Handle to the socket.
+  => WebSocketConfig                    -- ^ Configuration
+  -> WebSocket                          -- ^ Handle to the socket.
   -> (WebSocketEvent message -> action) -- ^ Event handler.
-  -> (WebSocketClosedEvent -> IO Bool) -- ^ Decide whether to reconnect on close.
-  -> Sub action model
-websocketSubWithCloseHandler socket handler handleClose getModel writeEvent = do
-  -- Will receive a value when the socket closes.
-  closedEventMV <- newEmptyMVar
+  -> Sub action model                   -- ^ A subscription
+websocketSubWithConfig config socket handler getModel sink = do
+  let (url, protocols) = (wsURL socket, wsProtocols socket)
 
-  -- Spin off the reconnection thread
-  void $ forkIO $ do
-    reconnect <- takeMVar closedEventMV >>= handleClose
-    when reconnect $ do
-      let (url, protocols) = (getSocketURL socket, wsProtocols socket)
-      socketOrErr <- newWebSocket_ url protocols
-      case socketOrErr of
-        Right ws -> do
-          setSocket_ socket ws
-          websocketSubWithCloseHandler socket handler handleClose
-                                       getModel writeEvent
-        Left err -> putStrLn $ "Error when reconnecting to websocket "
-                            <> show socket <> ": " <> show err
+  -- Spin off ping thread if configured
+  pingThreadId <- case websocketPing config of
+    Nothing -> pure Nothing
+    Just (PingConfig{..}) -> fmap Just $ forkIO $ forever $ do
+      threadDelay (pingSeconds * 1000000)
+      sendTextToWebSocket socket pingSend
 
-  -- Set up event handlers on the socket
+  -- Fire the WebSocketOpen event when the socket opens.
   socket_ <- getSocket_ socket
   onOpen socket_ =<< do
-    asyncCallback (writeEvent (handler WebSocketOpen))
+    asyncCallback (sink (handler WebSocketOpen))
 
+  -- When a message is received, parse it as JSON and fire an event.
   onMessage socket_ =<< do
-    asyncCallback1 $ \v -> do
-      d <- parse =<< getData v
-      writeEvent $ handler (WebSocketMessage d)
+    let parseData raw = do
+          result <- safeParseString raw
+          sink $ case result of
+            Error err -> handler (WebSocketUnparseableMessage raw (ms err))
+            Success message -> handler (WebSocketMessage message)
+    asyncCallback1 $ case websocketPing config of
+      -- Iff a ping is configured, filter out ping responses before parsing.
+      Just (PingConfig {..}) -> getData >=> \case
+        msg | msg == pingReceive -> pure ()
+        rawData -> parseData rawData
+      Nothing -> getData >=> parseData
 
+  -- When the socket closed, determine whether to reconnect. If so,
+  -- update the MVar in the WebSocket. If reconnection fails, the
+  -- WebSocketConnectFailed event will be fired.
   onClose socket_ =<< do
     asyncCallback1 $ \e -> do
+      -- Stop the ping thread, if it's running.
+      maybe (pure ()) killThread pingThreadId
+      -- Take this MVar to prevent further actions from hitting it.
+      void $ takeMVar (wsSocketRef socket)
       closedCode <- codeToCloseCode <$> getCode e
       closedReason <- getReason e
       closedCleanly <- wasClean e
       let closedEvent = WebSocketClosedEvent {..}
-      writeEvent $ handler (WebSocketClosed closedEvent)
-      putMVar closedEventMV closedEvent
+      websocketShouldReconnectOnClose config closedEvent >>= \case
+        True -> newWebSocket_ url protocols >>= \case
+          Right ws -> do
+            setSocket_ socket ws
+            websocketSubWithConfig config socket handler getModel sink
+          Left err -> do
+            sink (handler $ WebSocketConnectFailed url protocols err)
+        False -> sink $ handler (WebSocketClosed closedEvent)
 
+  -- On an error, fire the WebSocketError event.
   onError socket_ =<< do
     asyncCallback1 $ \v -> do
-      d <- parse =<< getData v
-      writeEvent $ handler (WebSocketError d)
+      sink =<< handler . WebSocketError <$> getData v
+
+--------------------------------------------------------------------------------
 
 -- | Read the IORef in a WebSocket to get its WebSocket_
 getSocket_ :: WebSocket -> IO WebSocket_
-getSocket_ = readIORef . wsSocketRef
+getSocket_ = readMVar . wsSocketRef
 
 -- | Set the IORef on a WebSocket.
 setSocket_ :: WebSocket -> WebSocket_ -> IO ()
-setSocket_ ws ws_ = writeIORef (wsSocketRef ws) ws_
+setSocket_ ws ws_ = putMVar (wsSocketRef ws) ws_
 
 -- | Retrieves current status of `socket`
 getSocketState :: WebSocket -> IO SocketState
@@ -278,25 +279,6 @@ sendTextToWebSocket :: WebSocket -> MisoString -> IO ()
 sendTextToWebSocket socket m = do
   socket_ <- getSocket_ socket
   send' socket_ m
-
--- | Convert a numeric close code to the enumerated type.
-codeToCloseCode :: Int -> CloseCode
-codeToCloseCode = \case
-  1000 -> Normal_Closure
-  1001 -> Going_Away
-  1002 -> Protocol_Error
-  1003 -> Unsupported_Data
-  1005 -> No_Status_Recvd
-  1006 -> Abnormal_Closure
-  1007 -> Invalid_Frame_Payload_Data
-  1008 -> Policy_Violation
-  1009 -> Message_Too_Big
-  1010 -> Missing_Extension
-  1011 -> Internal_Error
-  1012 -> Service_Restart
-  1013 -> Try_Again_Later
-  1015 -> TLS_Handshake
-  n    -> OtherCode n
 
 
 --------------------------------------------------------------------------------
@@ -318,7 +300,7 @@ foreign import javascript unsafe "$r = $1.readyState;"
 
 -- | Use this to figure out if websocket creation was successful.
 foreign import javascript safe "$r = $1.constructor === WebSocket;"
-  isWebSocket' :: JSVal -> Bool
+  isWebSocket' :: JSVal -> IO Bool
 
 -- | Get the message off of the exception so that we can return it.
 foreign import javascript safe "$r = $1.message;"
@@ -336,8 +318,8 @@ foreign import javascript unsafe "$1.onmessage = $2"
 foreign import javascript unsafe "$1.onerror = $2"
   onError :: WebSocket_ -> Callback (JSVal -> IO ()) -> IO ()
 
-foreign import javascript unsafe "$r = $1.data"
-  getData :: JSVal -> IO JSVal
+foreign import javascript unsafe "$r = $1.data || ''"
+  getData :: JSVal -> IO JSString
 
 foreign import javascript unsafe "$r = $1.wasClean"
   wasClean :: JSVal -> IO Bool
@@ -348,5 +330,60 @@ foreign import javascript unsafe "$r = $1.code"
 foreign import javascript unsafe "$r = $1.reason"
   getReason :: JSVal -> IO MisoString
 
-foreign import javascript unsafe "$r = ($1 === $2);"
-  webSocketsEqual' :: WebSocket_ -> WebSocket_ -> Bool
+
+-- | Code corresponding to a closed connection
+-- https://developer.mozilla.org/en-US/docs/Web/API/CloseEvent
+data CloseCode
+  = CLOSE_NORMAL
+   -- ^ 1000, Normal closure; the connection successfully completed whatever purpose for which it was created.
+  | CLOSE_GOING_AWAY
+   -- ^ 1001, The endpoint is going away, either because of a server failure or because the browser is navigating away from the page that opened the connection.
+  | CLOSE_PROTOCOL_ERROR
+   -- ^ 1002, The endpoint is terminating the connection due to a protocol error.
+  | CLOSE_UNSUPPORTED
+   -- ^ 1003, The connection is being terminated because the endpoint received data of a type it cannot accept (for example, a textonly endpoint received binary data).
+  | CLOSE_NO_STATUS
+   -- ^ 1005, Reserved.  Indicates that no status code was provided even though one was expected.
+  | CLOSE_ABNORMAL
+   -- ^ 1006, Reserved. Used to indicate that a connection was closed abnormally (that is, with no close frame being sent) when a status code is expected.
+  | Unsupported_Data
+   -- ^ 1007, The endpoint is terminating the connection because a message was received that contained inconsistent data (e.g., nonUTF8 data within a text message).
+  | Policy_Violation
+   -- ^ 1008, The endpoint is terminating the connection because it received a message that violates its policy. This is a generic status code, used when codes 1003 and 1009 are not suitable.
+  | CLOSE_TOO_LARGE
+   -- ^ 1009, The endpoint is terminating the connection because a data frame was received that is too large.
+  | Missing_Extension
+   -- ^ 1010, The client is terminating the connection because it expected the server to negotiate one or more extension, but the server didn't.
+  | Internal_Error
+   -- ^ 1011, The server is terminating the connection because it encountered an unexpected condition that prevented it from fulfilling the request.
+  | Service_Restart
+   -- ^ 1012, The server is terminating the connection because it is restarting.
+  | Try_Again_Later
+   -- ^ 1013, The server is terminating the connection due to a temporary condition, e.g. it is overloaded and is casting off some of its clients.
+  | TLS_Handshake
+   -- ^ 1015, Reserved. Indicates that the connection was closed due to a failure to perform a TLS handshake (e.g., the server certificate can't be verified).
+  | OtherCode Int
+   -- ^ OtherCode that is reserved and not in the range 0999
+  deriving (Show, Eq, Generic)
+
+instance ToJSVal CloseCode
+instance FromJSVal CloseCode
+
+codeToCloseCode :: Int -> CloseCode
+codeToCloseCode = go
+  where
+    go 1000 = CLOSE_NORMAL
+    go 1001 = CLOSE_GOING_AWAY
+    go 1002 = CLOSE_PROTOCOL_ERROR
+    go 1003 = CLOSE_UNSUPPORTED
+    go 1005 = CLOSE_NO_STATUS
+    go 1006 = CLOSE_ABNORMAL
+    go 1007 = Unsupported_Data
+    go 1008 = Policy_Violation
+    go 1009 = CLOSE_TOO_LARGE
+    go 1010 = Missing_Extension
+    go 1011 = Internal_Error
+    go 1012 = Service_Restart
+    go 1013 = Try_Again_Later
+    go 1015 = TLS_Handshake
+    go n    = OtherCode n

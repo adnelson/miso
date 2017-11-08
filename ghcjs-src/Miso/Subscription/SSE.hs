@@ -28,7 +28,7 @@ module Miso.Subscription.SSE
 import Data.Aeson (FromJSON, Result(..))
 import GHCJS.Foreign.Callback (Callback, asyncCallback, asyncCallback1)
 import GHCJS.Types (JSVal)
-import Miso.FFI (parseResult, jsvalToValue)
+import Miso.FFI (safeParse, jsvalToValue)
 import Miso.Html.Internal     ( Sub )
 import Miso.String hiding (concat)
 
@@ -45,7 +45,7 @@ sseSubFromEventSource eventSource f _ = \sink -> do
   onMessage eventSource =<< do
     asyncCallback1 $ \jval -> do
       data_ <- getData jval
-      parseResult data_ >>= \case
+      safeParse data_ >>= \case
         Success message -> sink $ f (SSEMessage message)
         Error e -> do
           Just val <- jsvalToValue data_
