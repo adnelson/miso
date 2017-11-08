@@ -317,7 +317,7 @@ foreign import javascript unsafe "$r = $1.readyState;"
   getSocketState' :: WebSocket_ -> IO Int
 
 -- | Use this to figure out if websocket creation was successful.
-foreign import javascript safe "$r = typeof $1 === 'string';"
+foreign import javascript safe "$r = $1.constructor === WebSocket;"
   isWebSocket' :: JSVal -> Bool
 
 -- | Get the message off of the exception so that we can return it.
