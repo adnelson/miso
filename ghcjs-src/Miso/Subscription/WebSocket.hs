@@ -32,6 +32,7 @@ module Miso.Subscription.WebSocket
 
     -- * Interacting with the websocket
   , sendJsonToWebSocket
+  , sendTextToWebSocket
   , closeWebSocket
   , closeWebSocketWithCode
 
@@ -270,9 +271,13 @@ getSocketState socket = toEnum <$> (getSocketState' =<< getSocket_ socket)
 
 -- | Send a JSON-able message to a websocket.
 sendJsonToWebSocket :: ToJSON json => WebSocket -> json -> IO ()
-sendJsonToWebSocket socket m = do
+sendJsonToWebSocket socket m = sendTextToWebSocket socket =<< stringify m
+
+-- | Send arbitrary text to a websocket.
+sendTextToWebSocket :: WebSocket -> MisoString -> IO ()
+sendTextToWebSocket socket m = do
   socket_ <- getSocket_ socket
-  send' socket_ =<< stringify m
+  send' socket_ m
 
 -- | Convert a numeric close code to the enumerated type.
 codeToCloseCode :: Int -> CloseCode
