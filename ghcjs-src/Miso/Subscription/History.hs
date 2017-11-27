@@ -23,14 +23,21 @@ module Miso.Subscription.History
   , URI (..)
   ) where
 
-import Control.Concurrent
-import Control.Monad
-import GHCJS.Foreign.Callback
-import Miso.Concurrent
-import Miso.Html.Internal     ( Sub )
-import Miso.String
-import Network.URI            hiding (path)
-import System.IO.Unsafe
+import Control.Concurrent     (forkIO)
+import Control.Monad          (void, forever)
+import GHCJS.Foreign.Callback (Callback, asyncCallback)
+import Network.URI            (URI(URI, uriPath))
+import System.IO.Unsafe       (unsafePerformIO)
+
+import Miso.Concurrent        (Notify, newNotify, notify, wait)
+import Miso.Html.Internal     (Sub)
+import Miso.String            (MisoString, pack, unpack)
+
+-- | Add a prefix to a string, unless it already has it.
+ensurePrefix :: Char -> String -> String
+ensurePrefix p s = case s of
+  first:_ | first == p -> s
+  _ -> p : s
 
 -- | Retrieves current URI of page
 getCurrentURI :: IO URI
@@ -43,7 +50,7 @@ getURI :: IO URI
 getURI = do
   URI <$> do unpack <$> getProtocol
       <*> pure Nothing
-      <*> do Prelude.drop 1 . unpack <$> getPathName
+      <*> do ensurePrefix '/' . unpack <$> getPathName
       <*> do unpack <$> getSearch
       <*> do unpack <$> getHash
 
@@ -53,7 +60,7 @@ pushURI :: URI -> IO ()
 pushURI uri = pushStateNoModel uri { uriPath = path }
   where
     path | uriPath uri == mempty = "/"
-         | otherwise = uriPath uri
+         | otherwise = ensurePrefix '/' (uriPath uri)
 
 -- | Replaces current URI on stack
 replaceURI :: URI -> IO ()
@@ -61,7 +68,7 @@ replaceURI :: URI -> IO ()
 replaceURI uri = replaceTo' uri { uriPath = path }
   where
     path | uriPath uri == mempty = "/"
-         | otherwise = uriPath uri
+         | otherwise = ensurePrefix '/' (uriPath uri)
 
 -- | Navigates backwards
 back :: IO ()
@@ -78,15 +85,16 @@ go :: Int -> IO ()
 {-# INLINE go #-}
 go n = go' n
 
-chan :: Notify
-{-# NOINLINE chan #-}
-chan = unsafePerformIO newNotify
+-- | Notifier for when a URI change occurs
+notifier :: Notify
+{-# NOINLINE notifier #-}
+notifier = unsafePerformIO newNotify
 
 -- | Subscription for `popState` events, from the History API
 uriSub :: (URI -> action) -> Sub action model
 uriSub = \f _ sink -> do
   void.forkIO.forever $ do
-    wait chan >> do
+    wait notifier >> do
       sink =<< f <$> getURI
   onPopState =<< do
      asyncCallback $ do
@@ -102,34 +110,34 @@ foreign import javascript unsafe "window.history.forward();"
   forward' :: IO ()
 
 foreign import javascript unsafe "$r = window.location.pathname;"
-  getPathName :: IO JSString
+  getPathName :: IO MisoString
 
 foreign import javascript unsafe "$r = window.location.search;"
-  getSearch :: IO JSString
+  getSearch :: IO MisoString
 
 foreign import javascript unsafe "$r = window.location.hash;"
-  getHash :: IO JSString
+  getHash :: IO MisoString
 
 foreign import javascript unsafe "$r = window.location.protocol;"
-  getProtocol :: IO JSString
+  getProtocol :: IO MisoString
 
 foreign import javascript unsafe "window.addEventListener('popstate', $1);"
   onPopState :: Callback (IO ()) -> IO ()
 
 foreign import javascript unsafe "window.history.pushState(null, null, $1);"
-  pushStateNoModel' :: JSString -> IO ()
+  pushStateNoModel' :: MisoString -> IO ()
 
 foreign import javascript unsafe "window.history.replaceState(null, null, $1);"
-  replaceState' :: JSString -> IO ()
+  replaceState' :: MisoString -> IO ()
 
 pushStateNoModel :: URI -> IO ()
 {-# INLINE pushStateNoModel #-}
 pushStateNoModel u = do
   pushStateNoModel' . pack . show $ u
-  notify chan
+  notify notifier
 
 replaceTo' :: URI -> IO ()
 {-# INLINE replaceTo' #-}
 replaceTo' u = do
   replaceState' . pack . show $ u
-  notify chan
+  notify notifier
