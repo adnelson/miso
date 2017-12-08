@@ -20,7 +20,7 @@ import Data.IORef              (IORef, newIORef, readIORef, writeIORef)
 import Data.IntMap             (IntMap, insert, lookup, delete)
 import GHC.Generics            (Generic)
 
-import Miso.Html.Internal (Sub)
+import Miso.Html.Internal      (Sub)
 
 -- | Provides facilities for adding/removing subscriptions.
 data SubscriptionManager action model = SubscriptionManager {
@@ -63,7 +63,8 @@ startSubscription (SubscriptionManager{..}) sub = do
 -- the user to stop any asynchronous functions/threads/etc that might
 -- be producing those events. For example, if your subscription gets
 -- events from a WebSocket, you should close that websocket so it's
--- not using CPU/memory.
+-- not using CPU/memory/network. If your subscription listens to
+-- events from the window, you should remove relevant event listeners.
 --
 -- Idempotent and safe to call even if the given ID doesn't exist.
 stopSubscription :: SubscriptionManager action model -> Int -> IO ()
@@ -73,7 +74,8 @@ stopSubscription (SubscriptionManager{..}) subId = do
       Nothing -> pure (subs, nextId)
       Just ref -> (delete subId subs, nextId) <$ writeIORef ref False
 
--- | Create a subscription from a subscription manager.
+-- | Create a subscription from a subscription manager. Put a call to
+-- this into the @subs@ list on your @App@.
 managerSub :: SubscriptionManager action model -> Sub action model
 managerSub (SubscriptionManager{..}) getModel sink = do
   putMVar ioModel getModel
