@@ -1,0 +1,32 @@
+{
+  "name": "reason-miso",
+  "version": "0.1.0",
+  "scripts": {
+    "re:clean": "bsb -clean-world",
+    "re:build": "bsb -make-world",
+    "re:watch": "bsb -make-world -w"
+  },
+  "keywords": [
+    "BuckleScript"
+  ],
+  "author": "",
+  "lint-staged": {
+    "*.{re,rei}": [
+      "bsrefmt --in-place"
+    ],
+    "*.{json,yaml}": [
+      "prettier --write"
+    ]
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "bs-platform": "^8",
+    "lint-staged": "^10.2.11",
+    "nodemon": "^2.0.4",
+    "parcel": "^1.12.4",
+    "prettier": "^2.0.5"
+  },
+  "dependencies": {
+    "bs-webapi": "^0.19.1"
+  }
+}
