@@ -9,7 +9,7 @@ Js.log("hello world!");
 
 // TODO use a library
 type node;
-type event;
+type event = (string, Js.Nullable.t(bool));
 
 [@bs.val] external document: Webapi.Dom.Document.t = "document";
 
@@ -43,16 +43,17 @@ module App = (Vtree: Vtree) => {
       ) {
       | [|(body: Webapi.Dom.Element.t)|] =>
         let mountPointElement = body;
-        let globalVtreeRef = ref(view(initialModel));
-        Vtree.delegate(mountPointElement, events, vtreeCallback =>
-          vtreeCallback(globalVtreeRef^)
+        let globalVtreeRef = ref(initialModel->view);
+        Vtree.delegate(
+          mountPointElement,
+          events,
+          vtreeCallback => {
+            Js.log("vtreeCallback");
+            vtreeCallback(globalVtreeRef^);
+          },
         );
-        Js.log("Started event loop!");
+        Js.log2("Started event loop!!!", Vtree.delegate);
       | _ => Js.Console.error("No body element was found")
       };
-      // Vtree.delegate(
-      //  let del = delegate(Obj.magic(2), [||]);
-      //  Js.log(del(_ => ()));
-      // failwith("not implemented");
     };
 };
